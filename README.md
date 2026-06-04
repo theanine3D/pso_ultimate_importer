@@ -6,7 +6,7 @@ This addon is based on the original scripts authored by Benjamin Collins (Kion).
 <img width="930" height="556" alt="promo" src="https://github.com/user-attachments/assets/4fbb585a-949a-44f1-a02d-1d08fe3fc384" />
 
 ## Features
-Currently, the addon supports the following formats, in addition to .BML support.
+Currently, the addon supports the following formats, in addition to .BML archives.
 
 | Platform      | Actors | Scenes | Textures |
 |---------------|-------------|------------------|---------------|
