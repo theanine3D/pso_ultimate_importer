@@ -15,9 +15,9 @@ Currently, the addon supports the following formats, in addition to .BML archive
 | Blue Burst    | `.xj`       | `.rel`           | `.xvm`        |
 
 Import settings allow you to customize how the model is imported.
-- Blend Vertex Colors - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
-- Disable Color Correction - adjusts the Color Management settings in your scene to sRGB / Standard, so colors match the original colors from PSO
-- Extend Viewport Clip Distance - increases the clipping distance in your scene just enough so that the model is immediately visible, no matter how large it might be
+- **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
+- **Disable Color Correction** - adjusts the Color Management settings in your scene to sRGB / Standard, so colors match the original colors from PSO
+- **Extend Viewport Clip Distance** - increases the clipping distance in your scene just enough so that the model is immediately visible, no matter how large it might be
 
 ## Installation
 1. Click the green "Code" button above and press "Download ZIP"
