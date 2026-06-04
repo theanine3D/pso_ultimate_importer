@@ -10,9 +10,9 @@ Currently, the addon supports the following formats, in addition to .BML archive
 
 | Platform      | Actors | Scenes | Textures |
 |---------------|-------------|------------------|---------------|
-| Dreamcast v2  | `.nj`       | `.rel`           | `.pvm`        |
-| GameCube      | `.gj`       | `.rel`           | `.gvm`        |
-| Blue Burst    | `.xj`       | `.rel`           | `.xvm`        |
+| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |
+| GameCube      | `.gj`       | `n.rel`           | `.gvm`        |
+| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |
 
 Import settings allow you to customize how the model is imported.
 - **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
