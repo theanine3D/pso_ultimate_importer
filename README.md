@@ -1,7 +1,7 @@
 # PSO Ultimate Importer
 Addon for Blender 4.x / 5.x that imports 3D model formats used by Phantasy Star Online and its various versions.
 
-This addon is based on the original scripts authored by Benjamin Collins (Kion). Without Kion's work on reverse-engineering these formats, this Blender addon would not exist. Check out his work on [GitLab](https://gitlab.com/dashgl/ikaruga/-/snippets), [YouTube](https://www.youtube.com/@kion_dgl). and [DashGL](https://dashgl.org/).
+This addon is based on the original scripts authored by Benjamin Collins (Kion). Without his work on reverse-engineering these formats, this Blender addon would not exist. Check out his work on [GitLab](https://gitlab.com/dashgl/ikaruga/-/snippets), [YouTube](https://www.youtube.com/@kion_dgl). and [DashGL](https://dashgl.org/).
 
 <img width="930" height="556" alt="promo" src="https://github.com/user-attachments/assets/4fbb585a-949a-44f1-a02d-1d08fe3fc384" />
 
