@@ -3240,7 +3240,7 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
 
     blend_vertex_colors: BoolProperty(
         name="Blend Vertex Colors",
-            "Apply vertex colors as lighting in the scene"
+            "Apply vertex colors as lighting in the scene",
         default=True,
     )
     disable_color_correction: BoolProperty(
