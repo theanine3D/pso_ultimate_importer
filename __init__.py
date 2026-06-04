@@ -1,5 +1,5 @@
 bl_info = {
-    "name": "PSO Model Importer",
+    "name": "PSO Ultimate Importer",
     "author": "Theanine3D (Blender addon) and Benjamin Collins (original scripts)",
     "version": (1, 0, 0),
     "blender": (4, 0, 0),
