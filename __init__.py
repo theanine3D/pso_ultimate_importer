@@ -1,6 +1,6 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
-    "author": "Theanine3D (Blender addon) and Benjamin Collins (original scripts)",
+    "author": "Theanine3D",
     "version": (1, 0, 0),
     "blender": (4, 0, 0),
     "location": "File > Import > PSO …",
@@ -1699,9 +1699,31 @@ class NinjaChunkMixin:
             'blendSrc': '', 'blendDst': '', 'doubleSided': False,
         }
         self._do_read = True
+        gc = bs._e == '>'
         while self._do_read:
-            ch = bs.readUByte()
-            cf = bs.readUByte()
+            if gc:
+                # GC big-endian NJ: chunk header words are stored BE.
+                # "No-length" chunk types (NJD_CN/CE, BITS 0x02-0x03, TINY 0x10-0x1F):
+                #   first BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
+                # "With-length" chunk types (MATERIAL, VERTEX, STRIP, VOLUME):
+                #   first BE uint16  = length word (discarded by handlers)
+                #   second BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
+                word0 = bs.readUShort()
+                ch_cand = word0 & 0xFF
+                no_len = (ch_cand == 0 or ch_cand == 0xFF or
+                          ch_cand in CHUNK_BITS or
+                          0x10 <= ch_cand <= 0x1F)
+                if no_len:
+                    ch = ch_cand
+                    cf = (word0 >> 8) & 0xFF
+                else:
+                    # word0 was the length; read the actual ch_cf word
+                    word1 = bs.readUShort()
+                    ch = word1 & 0xFF
+                    cf = (word1 >> 8) & 0xFF
+            else:
+                ch = bs.readUByte()
+                cf = bs.readUByte()
             if   ch == NJD_CE:
                 if self.jump_to:
                     bs.seek(self.jump_to); self.jump_to = 0; continue
@@ -1715,12 +1737,18 @@ class NinjaChunkMixin:
             elif ch in CHUNK_VOLUME:     self._volChunk(bs, ch, cf); return
 
     def _vChunk(self, bs, ch, cf):
-        bs.readUShort()                    # chunk length (words)
-        vofs   = bs.readUShort()           # index offset into stack
-        vcount = bs.readUShort()
+        if bs._e == '>':
+            # GC: length was consumed in readChunks; vcount precedes vofs
+            vcount = bs.readUShort()
+            vofs   = bs.readUShort()
+        else:
+            bs.readUShort()                # chunk length (words)
+            vofs   = bs.readUShort()       # index offset into stack
+            vcount = bs.readUShort()
 
-        read_color  = ch in (NJD_CV_D8, NJD_CV_VN_D8, NJD_CV_VNX_D8)
-        read_normal = NJD_CV_VN <= ch <= NJD_CV_VNX_UF
+        # In PSO NJ, chunk type 0x29 (NJD_CV_D8) stores pos+normal (24 bytes), not pos+color.
+        read_color  = ch in (NJD_CV_VN_D8, NJD_CV_VNX_D8)
+        read_normal = (NJD_CV_VN <= ch <= NJD_CV_VNX_UF) or ch == NJD_CV_D8
         is_sh       = ch in (NJD_CV_SH, NJD_CV_VN_SH)
         is_vnx      = ch in (NJD_CV_VNX, NJD_CV_VNX_D8, NJD_CV_VNX_UF)
 
@@ -1765,7 +1793,7 @@ class NinjaChunkMixin:
             bs.seek(self.store_ofs[cf])
 
     def _mChunk(self, bs, ch, cf):
-        bs.readUShort()                    # chunk_len (words)
+        if bs._e != '>': bs.readUShort()   # chunk_len (words); GC: consumed in readChunks
         src = cf & 0x07; dst = (cf >> 3) & 0x07
         if   src == 1 and dst == 4: self.material['blendSrc'] = 'ONE'; self.material['blendDst'] = 'ONE'
         elif src == 5 and dst == 4: self.material['blendSrc'] = '';    self.material['blendDst'] = ''
@@ -1785,7 +1813,7 @@ class NinjaChunkMixin:
         self.material['texIndex'] = tex_id   # validated at mesh-build time
 
     def _volChunk(self, bs, ch, cf):
-        bs.readUShort()  # chunk_len (words, unused here)
+        if bs._e != '>': bs.readUShort()   # chunk_len; GC: consumed in readChunks
         body        = bs.readUShort()
         strip_count = body & 0x3FFF
         triangles   = []
@@ -1803,7 +1831,7 @@ class NinjaChunkMixin:
         self._appendPoints(triangles)
 
     def _sChunk(self, bs, ch, cf):
-        bs.readUShort()                    # chunk_len
+        if bs._e != '>': bs.readUShort()   # chunk_len; GC: consumed in readChunks
         body        = bs.readUShort()
         double_side = cf & 0x10
         strip_count = body & 0x3FFF
@@ -3240,7 +3268,7 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
 
     blend_vertex_colors: BoolProperty(
         name="Blend Vertex Colors",
-            "Apply vertex colors as lighting in the scene",
+        description="Apply vertex colors as lighting in the scene",
         default=True,
     )
     disable_color_correction: BoolProperty(
