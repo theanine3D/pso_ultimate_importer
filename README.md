@@ -6,13 +6,13 @@ This addon is based on the original scripts authored by Benjamin Collins (Kion).
 <img width="930" height="556" alt="promo" src="https://github.com/user-attachments/assets/4fbb585a-949a-44f1-a02d-1d08fe3fc384" />
 
 ## Features
-Currently, the addon supports the following formats, in addition to .BML archives.
+Currently, the addon supports the following formats:
 
-| Platform      | Actors | Scenes | Textures |
-|---------------|-------------|------------------|---------------|
-| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |
-| GameCube      | `.gj`       | `n.rel`           | `.gvm`        |
-| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |
+| Platform      | Actors | Scenes | Textures | Archives |
+|---------------|-------------|------------------|---------------|----------|
+| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |         |
+| GameCube      | `.gj`       | `n.rel`           | `.gvm`        |         |
+| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |`.bml`   |
 
 Import settings allow you to customize some quality-of-life features.
 - **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
