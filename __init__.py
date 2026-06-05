@@ -36,6 +36,9 @@ MAGIC_GVRT = 0x54525647   # GVM individual texture
 MAGIC_GJTL = 0x4C544A47   # GJ texture-name list chunk
 MAGIC_GJCM = 0x4D434A47   # GJ geometry chunk
 
+# POF0 relocation chunk (pointer-offset table; present in some NJ/GJ files)
+MAGIC_POF0 = 0x30464F50   # 'POF0' little-endian
+
 # ============================================================
 # NJD Chunk constants (DC .nj and DC .rel formats)
 # ============================================================
@@ -1947,6 +1950,195 @@ class NinjaChunkMixin:
 
 
 # ============================================================
+# POF0 relocation helpers
+# ============================================================
+def parse_pof0(payload):
+    """
+    Decode a POF0 relocation payload into a list of byte offsets.
+    Each offset marks a location within the NJCM payload that holds a
+    pointer value needing the serialization base subtracted.
+
+    Encoding: variable-length difference-coded.  Each byte's top 2 bits
+    choose the jump width:
+      0x01-0x3F  small  — advance by (byte * 4)
+      0x40-0x7F  medium — advance by ((byte & 0x3F) << 8  | next) * 4
+      0x80-0xBF  large  — advance by ((byte & 0x3F) << 16 | next2) * 4
+      0x00       end of list
+    """
+    offsets = []
+    pos = 0
+    current = 0
+    n = len(payload)
+    while pos < n:
+        b = payload[pos]; pos += 1
+        if b == 0:
+            break
+        top2 = b >> 6
+        if top2 == 0:
+            delta = b * 4
+        elif top2 == 1:
+            if pos >= n:
+                break
+            b2 = payload[pos]; pos += 1
+            delta = ((b & 0x3F) << 8 | b2) * 4
+        elif top2 == 2:
+            if pos + 1 >= n:
+                break
+            b2 = payload[pos]; b3 = payload[pos + 1]; pos += 2
+            delta = ((b & 0x3F) << 16 | b2 << 8 | b3) * 4
+        else:
+            break  # 0xC0+ not used in PSO
+        current += delta
+        offsets.append(current)
+    return offsets
+
+
+def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
+    """
+    Patch an NJCM payload using a POF0 relocation table.
+
+    Reads the pointer values at every offset listed in the POF0 table.
+    If any pointer exceeds the payload size, a serialization base B is
+    inferred and subtracted from every non-zero pointer in the table.
+
+    Base detection: iterate over candidate "true minimum offsets" (the
+    target of the smallest non-null pointer in the file, typically 52 for
+    the first child bone) to derive a candidate B = min_raw_ptr - true_min.
+    Each candidate is validated by checking that:
+      (a) all non-zero adjusted pointers stay inside the payload, and
+      (b) the adjusted targets of the childOfs/siblingOfs fields at known
+          bone-node offsets (44, 48, 96, 100, …) look like valid NJ bone
+          flags (<= 0x3FFF).
+
+    Returns a new bytes object (the patched payload), or the original
+    payload unchanged if no relocation is necessary or no valid B found.
+    """
+    ptr_offsets = parse_pof0(pof0_payload)
+    if not ptr_offsets:
+        return njcm_payload
+
+    payload_size = len(njcm_payload)
+    bo = '>' if big_endian else '<'
+
+    # Collect (file_offset, raw_value) for every listed pointer
+    raw_ptrs = []
+    for off in ptr_offsets:
+        if off + 4 <= payload_size:
+            v, = struct.unpack_from(bo + 'I', njcm_payload, off)
+            raw_ptrs.append((off, v))
+
+    if not raw_ptrs:
+        return njcm_payload
+
+    non_zero_vals = [v for _, v in raw_ptrs if v != 0]
+    if not non_zero_vals or max(non_zero_vals) < payload_size:
+        return njcm_payload  # all pointers already valid
+
+    # Some files mix already-valid pointers (< payload_size) with clearly
+    # invalid ones (≥ payload_size).  Compute B only from the invalid
+    # ones — they supply the lower bound on B.  After applying B the
+    # valid-looking pointers (which also have base embedded) just become
+    # smaller and remain in-range.
+    invalid_vals = [v for v in non_zero_vals if v >= payload_size]
+    valid_vals   = [v for v in non_zero_vals if v <  payload_size]
+
+    if not invalid_vals:
+        return njcm_payload  # nothing to relocate
+
+    min_inv = min(invalid_vals)
+    max_inv = max(invalid_vals)
+
+    # B must:
+    #   (a) bring every invalid pointer in-range:  max_inv - B < payload_size
+    #                                           →  B > max_inv - payload_size
+    #   (b) keep every invalid pointer positive:   min_inv - B ≥ 4
+    #                                           →  B ≤ min_inv - 4
+    #   (c) keep every valid-but-relocated ptr positive:
+    #                                              B < min(valid_vals) if any
+    b_lo = (max_inv - payload_size + 4) & ~3
+    b_hi = (min_inv - 4) & ~3
+    if valid_vals:
+        b_hi = min(b_hi, (min(valid_vals) - 4) & ~3)
+
+    if b_lo > b_hi:
+        print("[PSO POF0] Cannot find valid relocation base "
+              "(b_lo=0x%X b_hi=0x%X) — skipping relocation" % (b_lo, b_hi))
+        return njcm_payload
+
+    def looks_like_bone(offset):
+        """Return True if bytes at offset could be the start of a NJ bone node."""
+        if offset + 4 > payload_size:
+            return False
+        flags, = struct.unpack_from(bo + 'I', njcm_payload, offset)
+        return flags <= 0x3FFF
+
+    # The root bone is always at NJCM offset 0 (NJ spec).
+    # Its childOfs field is at offset 44 and siblingOfs at offset 48.
+    # These are always bone pointers (never mesh pointers), so their targets
+    # reliably start with an NJ flags word.  Use them as anchor samples for
+    # the structure check; fall back to the first 5 non-zero values if
+    # neither root-bone field appears in the relocation table.
+    ptr_off_map = {off: v for off, v in raw_ptrs if v != 0}
+    bone_ptr_vals = [ptr_off_map[k] for k in (44, 48) if k in ptr_off_map]
+    # Only sample invalid-range values; valid-range values could be mesh
+    # pointers whose targets don't start with a bone-flags word.
+    invalid_bone_samples = [v for v in bone_ptr_vals if v >= payload_size]
+    sample_vals = (invalid_bone_samples if invalid_bone_samples
+                   else [v for v in invalid_vals[:5]])
+
+    # Iterate candidate true-offsets for the minimum *invalid* pointer
+    # (min_inv = min_true_offset + B → B = min_inv - true_min).
+    # At most 1024 iterations of O(N) constraint checks — very fast.
+    best_B = None
+    for true_min in range(4, min(4097, payload_size), 4):
+        B = min_inv - true_min
+        if B < b_lo or B > b_hi:
+            continue
+        # All invalid pointers must land inside the payload after adjustment
+        if not all(0 < v - B < payload_size for v in invalid_vals):
+            continue
+        # Valid pointers must still be positive after adjustment
+        if valid_vals and not all(v - B > 0 for v in valid_vals):
+            continue
+        if all(looks_like_bone(v - B) for v in sample_vals):
+            best_B = B
+            break
+
+    if best_B is None:
+        # Relax structure check; use the largest B satisfying the constraints.
+        for true_min in range(4, payload_size, 4):
+            B = min_inv - true_min
+            if not (b_lo <= B <= b_hi):
+                continue
+            if not all(0 < v - B < payload_size for v in invalid_vals):
+                continue
+            if valid_vals and not all(v - B > 0 for v in valid_vals):
+                continue
+            best_B = B
+            break
+
+    if best_B is None:
+        print("[PSO POF0] No valid relocation base found in range [%d, %d]" % (b_lo, b_hi))
+        return njcm_payload
+
+    print("[PSO POF0] Applying relocation base 0x%X to %d pointer(s) "
+          "(%d invalid, %d valid-but-relocated)" % (
+          best_B, len(raw_ptrs), len(invalid_vals), len(valid_vals)))
+
+    data = bytearray(njcm_payload)
+    for off, v in raw_ptrs:
+        if v == 0:
+            continue
+        adjusted = v - best_B
+        if 0 < adjusted < payload_size:
+            struct.pack_into(bo + 'I', data, off, adjusted)
+        else:
+            print("[PSO POF0] Warning: pointer 0x%X at 0x%X → "
+                  "adjusted 0x%X still invalid" % (v, off, adjusted))
+    return bytes(data)
+
+
+# ============================================================
 # DC .nj model importer
 # ============================================================
 class NinjaDCImporter(NinjaChunkMixin):
@@ -1966,13 +2158,12 @@ class NinjaDCImporter(NinjaChunkMixin):
 
     def parse(self, data):
         # ── Pass 1: collect chunk locations without consuming data ──────────
-        # Unknown chunks (e.g. POF0 in GC files) are skipped silently.
         chunk_map = {}   # magic → [(payload_offset, payload_length), ...]
         tmp  = BitStream(data)
         size = tmp.getSize() - 4
         while tmp.tell() < size:
             magic = tmp.readUInt()
-            if magic in (MAGIC_NJTL, MAGIC_NJCM, MAGIC_NMDM):
+            if magic in (MAGIC_NJTL, MAGIC_NJCM, MAGIC_NMDM, MAGIC_POF0):
                 clen = tmp.readUInt()
                 chunk_map.setdefault(magic, []).append((tmp.tell(), clen))
                 tmp.seek(clen, 1)
@@ -2010,8 +2201,21 @@ class NinjaDCImporter(NinjaChunkMixin):
                 c = os.path.splitext(os.path.basename(rn))[0]
                 if c: self.textures[idx]['name'] = c
 
+        # ── POF0 relocation: patch NJCM payload if a relocation table exists ──
+        # Some NJ files (notably certain GC boss models) are compiled with a
+        # non-zero serialization base, meaning their pointer values include an
+        # extra addend that must be subtracted before the offsets are usable.
+        # POF0 lists exactly which 32-bit words in the NJCM payload are pointers
+        # so we can patch them without guessing the struct layout.
+        pof0_chunks = chunk_map.get(MAGIC_POF0, [])
+
         for off, clen in chunk_map.get(MAGIC_NJCM, []):
-            self.bs = BitStream(data[off : off + clen], big_endian=big_endian)
+            njcm_bytes = data[off : off + clen]
+            if pof0_chunks:
+                pof0_off, pof0_clen = pof0_chunks[0]
+                pof0_bytes = data[pof0_off : pof0_off + pof0_clen]
+                njcm_bytes = apply_pof0_relocation(njcm_bytes, pof0_bytes, big_endian)
+            self.bs = BitStream(njcm_bytes, big_endian=big_endian)
             self._readBone()
             break   # only the first NJCM is geometry
 
