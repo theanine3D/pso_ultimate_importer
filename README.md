@@ -21,6 +21,9 @@ Import settings allow you to customize some quality-of-life features.
 - **Disable Color Correction** - adjusts the Color Management settings in your scene to sRGB / Standard, so colors match the original colors from PSO
 - **Extend Viewport Clip Distance** - increases the clipping distance in your scene just enough so that the model is immediately visible, no matter how large it might be
 
+Currently *not* supported:
+- Animations
+
 ## Installation
 1. Click the green "Code" button above and press "Download ZIP"
 2. Go into Blender's addon preferences (File → Preferences → Addons)
