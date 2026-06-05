@@ -2,7 +2,7 @@ bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
     "version": (1, 0, 0),
-    "blender": (4, 0, 0),
+    "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
         "Import Phantasy Star Online model and stage files: "
@@ -1234,6 +1234,14 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
             links.new(pp_v.outputs['Value'], comb.inputs['Y'])
             links.new(comb.outputs['Vector'], tex_node.inputs['Vector'])
 
+            if tex_has_alpha:
+                gt_node = nodes.new('ShaderNodeMath')
+                gt_node.operation = 'GREATER_THAN'
+                gt_node.inputs[1].default_value = 0.5
+                gt_node.location = (-150, -200)
+                links.new(tex_node.outputs['Alpha'], gt_node.inputs[0])
+                alpha_socket = gt_node.outputs['Value']
+
             if use_vc_blend:
                 # Exact blend used by the original game:
                 #   step 1 — vc_squared = Multiply(Col, Col)
@@ -1265,10 +1273,12 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
                     # Solid-color texture: fixed 50% alpha, no socket connection
                     shader.inputs['Alpha'].default_value = 0.5
                 else:
-                    links.new(tex_node.outputs['Alpha'], shader.inputs['Alpha'])
+                    links.new(alpha_socket, shader.inputs['Alpha'])
 
-            if md['diffuse'][3] < 1.0 or md['blendSrc'] or tex_has_alpha or tex_is_solid:
-                mat.blend_method = 'BLEND'
+            if tex_has_alpha:
+                mat.surface_render_method = 'DITHERED'
+            elif md['diffuse'][3] < 1.0 or md['blendSrc'] or tex_is_solid:
+                mat.surface_render_method = 'BLENDED'
 
         # --- Final surface → output wiring, with transparency for Emission ---
         if use_vc_blend:
@@ -1283,7 +1293,7 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
                 links.new(transp.outputs['BSDF'],      mix.inputs[1])
                 links.new(shader.outputs['Emission'],  mix.inputs[2])
                 links.new(mix.outputs['Shader'],       out.inputs['Surface'])
-                mat.blend_method = 'BLEND'
+                mat.surface_render_method = 'DITHERED'
             elif tex_is_solid:
                 # Solid-color texture: fixed 50% mix, no socket connection
                 out.location = (950, 0)
@@ -1295,7 +1305,7 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
                 links.new(transp.outputs['BSDF'],      mix.inputs[1])
                 links.new(shader.outputs['Emission'],  mix.inputs[2])
                 links.new(mix.outputs['Shader'],       out.inputs['Surface'])
-                mat.blend_method = 'BLEND'
+                mat.surface_render_method = 'BLENDED'
             else:
                 links.new(shader.outputs['Emission'], out.inputs['Surface'])
 
