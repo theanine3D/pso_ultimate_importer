@@ -1828,8 +1828,10 @@ class NinjaChunkMixin:
             if ch == NJD_CV_VN_NF:
                 nofs = bs.readShort(); bs.readShort()
                 key  = str(vofs + nofs)
-                if key in self.vertex_stack:
-                    v['pos'] = self.vertex_stack[key]['pos']
+                # Use the stream position (already transformed to world space by the
+                # current bone's matrix). Borrowing the world-space position from a
+                # sibling bone's stack entry would place the vertex on the wrong side
+                # of the body for mirrored limbs (e.g. PSO BB character arms).
                 self.vertex_stack[key] = v
             else:
                 self.vertex_stack[str(vofs + i)] = v
@@ -2061,8 +2063,13 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
         b_hi = min(b_hi, (min(valid_vals) - 4) & ~3)
 
     if b_lo > b_hi:
-        print("[PSO POF0] Cannot find valid relocation base "
-              "(b_lo=0x%X b_hi=0x%X) — skipping relocation" % (b_lo, b_hi))
+        # Invalid pointer values span a range larger than the payload; the
+        # POF0 for this chunk likely uses absolute file offsets rather than
+        # NJCM-relative offsets.  Skip relocation — the parser will fall back
+        # to whatever valid pointers already exist in the payload.
+        print("[PSO POF0] Skipping relocation: invalid pointer range "
+              "(0x%X..0x%X) exceeds payload size %d — "
+              "probable absolute-offset POF0" % (min_inv, max_inv, payload_size))
         return njcm_payload
 
     def looks_like_bone(offset):
