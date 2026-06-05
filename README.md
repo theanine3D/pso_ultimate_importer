@@ -22,7 +22,7 @@ Import settings allow you to customize some quality-of-life features.
 - **Extend Viewport Clip Distance** - increases the clipping distance in your scene just enough so that the model is immediately visible, no matter how large it might be
 
 Currently *not* supported:
-- Animations
+- Animations / skeletons
 
 ## Installation
 1. Click the green "Code" button above and press "Download ZIP"
