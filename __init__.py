@@ -1701,17 +1701,24 @@ class NinjaChunkMixin:
         self._do_read = True
         gc = bs._e == '>'
         while self._do_read:
+            if bs.pos + 2 > bs.getSize():
+                break   # not enough bytes left for any chunk header
             if gc:
                 # GC big-endian NJ: chunk header words are stored BE.
                 # "No-length" chunk types (NJD_CN/CE, BITS 0x02-0x03, TINY 0x10-0x1F):
                 #   first BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
-                # "With-length" chunk types (MATERIAL, VERTEX, STRIP, VOLUME):
+                # "With-length" chunk types (VERTEX only in practice):
                 #   first BE uint16  = length word (discarded by handlers)
                 #   second BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
+                # All other types (TINY, MATERIAL, STRIP, VOLUME) put ch_cf first,
+                # then a length word (handled by the individual chunk methods).
                 word0 = bs.readUShort()
                 ch_cand = word0 & 0xFF
                 no_len = (ch_cand == 0 or ch_cand == 0xFF or
                           ch_cand in CHUNK_BITS or
+                          ch_cand in CHUNK_TINY or
+                          ch_cand in CHUNK_STRIP or
+                          ch_cand in CHUNK_VOLUME or
                           0x10 <= ch_cand <= 0x1F)
                 if no_len:
                     ch = ch_cand
@@ -1793,7 +1800,7 @@ class NinjaChunkMixin:
             bs.seek(self.store_ofs[cf])
 
     def _mChunk(self, bs, ch, cf):
-        if bs._e != '>': bs.readUShort()   # chunk_len (words); GC: consumed in readChunks
+        bs.readUShort()   # chunk_len (words); present after ch_cf for both LE and GC
         src = cf & 0x07; dst = (cf >> 3) & 0x07
         if   src == 1 and dst == 4: self.material['blendSrc'] = 'ONE'; self.material['blendDst'] = 'ONE'
         elif src == 5 and dst == 4: self.material['blendSrc'] = '';    self.material['blendDst'] = ''
@@ -1813,7 +1820,7 @@ class NinjaChunkMixin:
         self.material['texIndex'] = tex_id   # validated at mesh-build time
 
     def _volChunk(self, bs, ch, cf):
-        if bs._e != '>': bs.readUShort()   # chunk_len; GC: consumed in readChunks
+        bs.readUShort()   # chunk_len; present after ch_cf for both LE and GC
         body        = bs.readUShort()
         strip_count = body & 0x3FFF
         triangles   = []
@@ -1831,7 +1838,7 @@ class NinjaChunkMixin:
         self._appendPoints(triangles)
 
     def _sChunk(self, bs, ch, cf):
-        if bs._e != '>': bs.readUShort()   # chunk_len; GC: consumed in readChunks
+        bs.readUShort()   # chunk_len; present after ch_cf for both LE and GC
         body        = bs.readUShort()
         double_side = cf & 0x10
         strip_count = body & 0x3FFF
@@ -1867,15 +1874,19 @@ class NinjaChunkMixin:
     def _appendPoints(self, triangles):
         if not triangles: return
         pos_list=[]; norm_list=[]; color_list=[]; uv_list=[]; tri_list=[]
-        for pt in triangles:
-            key = pt['index']
-            if key not in self.vertex_stack: continue
-            vt = self.vertex_stack[key]
-            tri_list.append(len(pos_list))
-            pos_list.append(vt['pos'])
-            if vt.get('norm'):  norm_list.append(vt['norm'])
-            if vt.get('color'): color_list.append(vt['color'])
-            if pt.get('uv'):    uv_list.append(pt['uv'])
+        # Process complete triangles atomically: skip any triangle where a vertex
+        # is absent from the stack (avoids a non-multiple-of-3 triangle list).
+        for j in range(0, len(triangles) - 2, 3):
+            pts = (triangles[j], triangles[j+1], triangles[j+2])
+            if any(pt['index'] not in self.vertex_stack for pt in pts):
+                continue
+            for pt in pts:
+                vt = self.vertex_stack[pt['index']]
+                tri_list.append(len(pos_list))
+                pos_list.append(vt['pos'])
+                if vt.get('norm'):  norm_list.append(vt['norm'])
+                if vt.get('color'): color_list.append(vt['color'])
+                if pt.get('uv'):    uv_list.append(pt['uv'])
         if not pos_list: return
         has_vc  = bool(color_list)
         mat_key = (self.material['diffuse'], self.material['texIndex'],
@@ -2683,6 +2694,23 @@ def find_gvm_path(filepath):
     return None
 
 
+def find_compound_tex_path(model_filepath):
+    """Check for a compound-extension texture archive beside a model file.
+
+    For a model at 'path/model.nj', checks (in order):
+        path/model.nj.xvm  path/model.nj.XVM
+        path/model.nj.gvm  path/model.nj.GVM
+        path/model.nj.pvm  path/model.nj.PVM
+    Works for any model extension (.nj, .xj, .gj, …).
+    Returns the first path that exists, or None.
+    """
+    for tex_ext in ('.xvm', '.XVM', '.gvm', '.GVM', '.pvm', '.PVM'):
+        candidate = model_filepath + tex_ext
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 # ============================================================
 # Shared operator mix-in for common import settings
 # ============================================================
@@ -2881,8 +2909,10 @@ class IMPORT_OT_pso_xj(Operator, ImportHelper):
             self.report({'ERROR'}, "Cannot open file: %s" % e)
             return {'CANCELLED'}
 
-        # XJ texture archive: same base name, .xvm preferred, .pvm as fallback
+        # XJ texture archive: compound extension first, then same base name
         tex_path = self.xvm_filepath.strip()
+        if not tex_path:
+            tex_path = find_compound_tex_path(filepath)
         if not tex_path:
             stem = os.path.splitext(filepath)[0]
             xvm_candidate = stem + ".xvm"
@@ -2960,6 +2990,7 @@ def _make_pvm_operator_body(operator, context, geo_class, file_data,
     """
     manual = operator.xvm_filepath.strip()
     tex_path = (manual
+                or find_compound_tex_path(filepath)
                 or find_pvm_path(filepath)
                 or find_gvm_path(filepath))
     textures = []
@@ -3142,19 +3173,21 @@ class IMPORT_OT_pso_gj(Operator, ImportHelper):
         except OSError as e:
             self.report({'ERROR'}, "Cannot open: %s" % e); return {'CANCELLED'}
 
-        gvm_path = self.xvm_filepath.strip() or find_gvm_path(filepath)
+        gvm_path = (self.xvm_filepath.strip()
+                    or find_compound_tex_path(filepath)
+                    or find_gvm_path(filepath))
         textures = []
         if gvm_path and os.path.exists(gvm_path):
             try:
                 with open(gvm_path, 'rb') as f: raw = f.read()
-                textures = gvm_load(raw)
+                textures = load_texture_archive(raw)
                 msg = "Loaded %d texture(s) from %s" % (len(textures), os.path.basename(gvm_path))
                 self.report({'INFO'}, msg); print("[PSO GC .gj] " + msg)
             except Exception as e:
                 self.report({'WARNING'}, "Texture load failed: %s" % e)
                 print("[PSO GC .gj] Texture load failed: %s" % e)
         else:
-            tried = gvm_path or "(no .gvm found)"
+            tried = gvm_path or "(no .gj.gvm / .gvm found)"
             self.report({'WARNING'}, "GVM not found — tried: %s" % tried)
             print("[PSO GC .gj] GVM not found — tried: %s" % tried)
 
@@ -3309,8 +3342,14 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             return {'CANCELLED'}
 
         # Build (model_entry, texture_entry_or_None) pairs.
-        # The texture archive, when present, is always the entry immediately
-        # following its model (that is how bml_read emits them).
+        # Priority order for finding a texture for a given model entry:
+        #   1. The BML entry immediately following the model (bml_read standard layout)
+        #   2. A BML entry whose name is the model filename + a texture extension
+        #      (compound extension, e.g. "robby_cat.nj.xvm" for "robby_cat.nj")
+        _COMPOUND_TEX_EXTS = ('.xvm', '.gvm', '.pvm')
+        # Build a lookup: lower-case filename -> entry, for compound-ext search
+        _entry_by_name = {e['filename'].lower(): e for e in entries}
+
         pairs = []
         i = 0
         while i < len(entries):
@@ -3319,11 +3358,19 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             if ext in _MODEL_EXTS:
                 model = entries[i]
                 tex   = None
+                # 1. Check immediate next entry (standard embedded layout)
                 if (i + 1 < len(entries) and
                         os.path.splitext(entries[i + 1]['filename'])[1].lower()
                         in _TEXTURE_EXTS):
                     tex = entries[i + 1]
                     i  += 1          # consume the texture entry
+                # 2. Fall back to compound-named entry anywhere in the archive
+                if tex is None:
+                    for tex_ext in _COMPOUND_TEX_EXTS:
+                        compound = (name + tex_ext).lower()
+                        if compound in _entry_by_name:
+                            tex = _entry_by_name[compound]
+                            break
                 pairs.append((model, tex))
             # .njm / .gjm and anything else is silently skipped
             i += 1
@@ -3331,6 +3378,27 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
         if not pairs:
             self.report({'WARNING'}, "No importable models (.nj/.gj/.xj) found in BML")
             return {'CANCELLED'}
+
+        # Try to load a sidecar texture archive that lives beside the .bml
+        # (same base name, extension .gvm / .pvm / .xvm).  Used as a fallback
+        # for models whose BML entry carries no embedded texture.
+        sidecar_textures = []
+        bml_stem = os.path.splitext(filepath)[0]
+        for tex_ext in ('.gvm', '.GVM', '.pvm', '.PVM', '.xvm', '.XVM'):
+            candidate = bml_stem + tex_ext
+            if os.path.exists(candidate):
+                try:
+                    with open(candidate, 'rb') as f:
+                        raw = f.read()
+                    sidecar_textures = load_texture_archive(raw)
+                    msg = "Loaded %d sidecar texture(s) from %s" % (
+                        len(sidecar_textures), os.path.basename(candidate))
+                    self.report({'INFO'}, msg)
+                    print("[PSO BML] " + msg)
+                except Exception as e:
+                    self.report({'WARNING'}, "Sidecar texture load failed (%s): %s" % (
+                        os.path.basename(candidate), e))
+                break   # stop after the first match
 
         total_meshes = 0
         total_tex    = 0
@@ -3340,14 +3408,39 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             name = model_entry['filename']
             ext  = os.path.splitext(name)[1].lower()
 
-            # Load textures
+            # Load textures — four sources tried in priority order:
             textures = []
+
+            # 1. Embedded archive inside the BML
             if tex_entry and tex_entry['data']:
                 try:
                     textures = load_texture_archive(tex_entry['data'])
                 except Exception as e:
                     self.report({'WARNING'}, "Texture load failed for %s: %s" % (
                         tex_entry['filename'], e))
+
+            # 2. Per-model external file in the BML's directory
+            #    (e.g. robby_cat.GVM beside the .bml for robby_cat.nj)
+            if not textures:
+                model_stem = os.path.splitext(name)[0]
+                bml_dir    = os.path.dirname(filepath)
+                for tex_ext in ('.gvm', '.GVM', '.pvm', '.PVM', '.xvm', '.XVM'):
+                    candidate = os.path.join(bml_dir, model_stem + tex_ext)
+                    if os.path.exists(candidate):
+                        try:
+                            with open(candidate, 'rb') as f:
+                                raw = f.read()
+                            textures = load_texture_archive(raw)
+                            print("[PSO BML] Loaded %d texture(s) from %s" % (
+                                len(textures), os.path.basename(candidate)))
+                        except Exception as e:
+                            self.report({'WARNING'}, "Per-model texture load failed (%s): %s" % (
+                                os.path.basename(candidate), e))
+                        break
+
+            # 3. BML-level sidecar (e.g. biri_ball.GVM shared across all models)
+            if not textures and sidecar_textures:
+                textures = sidecar_textures
 
             # Pick the right importer for the model format
             if ext == '.nj':
