@@ -944,16 +944,23 @@ class NinjaStageGeometry:
             'radius':                        self.bs.readFloat(),
         }
 
-        self.bs.seek(mesh['vertex_info_list_offset'])
-        self.readVertexList()
+        sz = self.bs.getSize()
+        vlo = mesh['vertex_info_list_offset']
+        if vlo and vlo < sz:
+            self.bs.seek(vlo)
+            self.readVertexList()
 
         if mesh['triangle_strip_a_count']:
-            self.bs.seek(mesh['triangle_strip_list_a_offset'])
-            self.readStripList(mesh['triangle_strip_a_count'], False)
+            aso = mesh['triangle_strip_list_a_offset']
+            if aso and aso < sz:
+                self.bs.seek(aso)
+                self.readStripList(mesh['triangle_strip_a_count'], False)
 
         if mesh['triangle_strip_b_count']:
-            self.bs.seek(mesh['triangle_strip_list_b_offset'])
-            self.readStripList(mesh['triangle_strip_b_count'], True)
+            bso = mesh['triangle_strip_list_b_offset']
+            if bso and bso < sz:
+                self.bs.seek(bso)
+                self.readStripList(mesh['triangle_strip_b_count'], True)
 
     # ------------------------------------------------------------------
     def readVertexList(self):
@@ -967,6 +974,9 @@ class NinjaStageGeometry:
         read_normal = bool(vtype & 0x02)
         read_color  = bool(vtype & 0x04)
 
+        sz = self.bs.getSize()
+        if not vofs or vofs >= sz:
+            return
         self.bs.seek(vofs)
         self.vertex_stack = {}
 
@@ -1511,16 +1521,23 @@ class NinjaXJImporter:
             'radius': self.bs.readFloat(),
         }
 
-        self.bs.seek(mesh['vertex_info_list_offset'])
-        self.readVertexList()
+        sz = self.bs.getSize()
+        vlo = mesh['vertex_info_list_offset']
+        if vlo and vlo < sz:
+            self.bs.seek(vlo)
+            self.readVertexList()
 
         if mesh['triangle_strip_a_count']:
-            self.bs.seek(mesh['triangle_strip_list_a_offset'])
-            self.readStripList(mesh['triangle_strip_a_count'], False)
+            aso = mesh['triangle_strip_list_a_offset']
+            if aso and aso < sz:
+                self.bs.seek(aso)
+                self.readStripList(mesh['triangle_strip_a_count'], False)
 
         if mesh['triangle_strip_b_count']:
-            self.bs.seek(mesh['triangle_strip_list_b_offset'])
-            self.readStripList(mesh['triangle_strip_b_count'], True)
+            bso = mesh['triangle_strip_list_b_offset']
+            if bso and bso < sz:
+                self.bs.seek(bso)
+                self.readStripList(mesh['triangle_strip_b_count'], True)
 
     # ------------------------------------------------------------------
     def readVertexList(self):
@@ -1534,6 +1551,9 @@ class NinjaXJImporter:
         read_normal = bool(vtype & 0x02)
         read_color  = bool(vtype & 0x04)
 
+        sz = self.bs.getSize()
+        if not vofs or vofs >= sz:
+            return
         self.bs.seek(vofs)
         self.vertex_stack = {}
 
@@ -1746,12 +1766,23 @@ class NinjaChunkMixin:
                     bs.seek(self.jump_to); self.jump_to = 0; continue
                 self._do_read = False
             elif ch == NJD_CN:           continue
-            elif ch in CHUNK_VERTEX:     self._vChunk(bs, ch, cf)
+            elif ch in CHUNK_VERTEX:
+                try:    self._vChunk(bs, ch, cf)
+                except struct.error: break
             elif ch in CHUNK_BITS:       self._bChunk(bs, ch, cf)
-            elif ch in CHUNK_MATERIAL:   self._mChunk(bs, ch, cf)
-            elif ch in CHUNK_TINY:       self._tChunk(bs, ch, cf)
-            elif ch in CHUNK_STRIP:      self._sChunk(bs, ch, cf)
-            elif ch in CHUNK_VOLUME:     self._volChunk(bs, ch, cf); return
+            elif ch in CHUNK_MATERIAL:
+                try:    self._mChunk(bs, ch, cf)
+                except struct.error: break
+            elif ch in CHUNK_TINY:
+                try:    self._tChunk(bs, ch, cf)
+                except struct.error: break
+            elif ch in CHUNK_STRIP:
+                try:    self._sChunk(bs, ch, cf)
+                except struct.error: break
+            elif ch in CHUNK_VOLUME:
+                try:    self._volChunk(bs, ch, cf)
+                except struct.error: pass
+                return
 
     def _vChunk(self, bs, ch, cf):
         if bs._e == '>':
@@ -1763,9 +1794,8 @@ class NinjaChunkMixin:
             vofs   = bs.readUShort()       # index offset into stack
             vcount = bs.readUShort()
 
-        # In PSO NJ, chunk type 0x29 (NJD_CV_D8) stores pos+normal (24 bytes), not pos+color.
-        read_color  = ch in (NJD_CV_VN_D8, NJD_CV_VNX_D8)
-        read_normal = (NJD_CV_VN <= ch <= NJD_CV_VNX_UF) or ch == NJD_CV_D8
+        read_color  = ch in (NJD_CV_VN_D8, NJD_CV_VNX_D8, NJD_CV_D8)
+        read_normal = (NJD_CV_VN <= ch <= NJD_CV_VNX_UF)
         is_sh       = ch in (NJD_CV_SH, NJD_CV_VN_SH)
         is_vnx      = ch in (NJD_CV_VNX, NJD_CV_VNX_D8, NJD_CV_VNX_UF)
 
@@ -1929,7 +1959,7 @@ class NinjaDCImporter(NinjaChunkMixin):
         self.textures       = []
         self.current_matrix = DashMat4()
         self.material       = {}
-        self.store_ofs      = [None] * 10
+        self.store_ofs      = [None] * 256
         self.jump_to        = 0
 
     def setTextures(self, textures): self.textures = textures
@@ -2053,7 +2083,7 @@ class NinjaDCRelImporter(NinjaChunkMixin):
         self.textures       = []
         self.current_matrix = DashMat4()
         self.material       = {}
-        self.store_ofs      = [None] * 10
+        self.store_ofs      = [None] * 256
         self.jump_to        = 0
         self.bs_d = self.bs_n = self.bs = None
 
@@ -2552,8 +2582,9 @@ def bml_read(data):
                             'compressed_size': pvm_comp,
                             'decompressed_size': pvm_decomp})
 
-    # Compressed data starts at the next 0x800-aligned offset after the table
-    ofs = (pos & 0xFFFFF800) + 0x800
+    # Compressed data starts at the next 0x800-aligned offset after the table.
+    # Round up: when pos is already 0x800-aligned, stay there (don't add another block).
+    ofs = (pos + 0x7FF) & 0xFFFFF800
 
     # Decompress each entry; null bytes between entries are padding
     result = []
@@ -3452,7 +3483,7 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             if not textures and sidecar_textures:
                 textures = sidecar_textures
 
-            # Pick the right importer for the model format
+            # Pick the right importer for the model format.
             if ext == '.nj':
                 geo = NinjaDCImporter()
             elif ext == '.gj':
@@ -3465,9 +3496,20 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             geo.setTextures(textures)
             try:
                 geo.parse(model_entry['data'])
-            except Exception as e:
-                self.report({'WARNING'}, "Parse error for %s: %s" % (name, e))
-                continue
+            except Exception:
+                # DC parsing failed — some .nj files in BB BML archives use the
+                # XJ mesh layout internally despite the .nj extension.  Retry.
+                if ext == '.nj':
+                    geo = NinjaXJImporter()
+                    geo.setTextures(textures)
+                    try:
+                        geo.parse(model_entry['data'])
+                    except Exception as e2:
+                        self.report({'WARNING'}, "Parse error for %s: %s" % (name, e2))
+                        continue
+                else:
+                    self.report({'WARNING'}, "Parse error for %s" % name)
+                    continue
 
             if not geo.meshes_data:
                 continue
