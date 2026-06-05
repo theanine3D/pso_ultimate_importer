@@ -3,6 +3,8 @@ Addon for Blender 4.2+ / 5.x that imports 3D model formats used by Phantasy Star
 
 This addon is based on the format reverse-engineering work by Benjamin Collins (Kion). Check out his work on [GitLab](https://gitlab.com/dashgl/ikaruga/-/snippets), [YouTube](https://www.youtube.com/@kion_dgl). and [DashGL](https://dashgl.org/).
 
+Need help with this addon? Join the [Realitea Discord](https://discord.gg/43ggeGC8A8) and ask for help.
+
 <img width="930" height="556" alt="promo" src="https://github.com/user-attachments/assets/4fbb585a-949a-44f1-a02d-1d08fe3fc384" />
 
 ## Features
