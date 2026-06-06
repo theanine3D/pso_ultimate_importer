@@ -10,7 +10,7 @@ Need help with this addon? Join the [Realitea Discord](https://discord.gg/43ggeG
 ## Features
 Currently, the addon supports the following formats:
 
-| Platform      | Actors | Scenes | Textures | Archives |
+| Platform      | Actors | Stages | Textures | Archives |
 |---------------|-------------|------------------|---------------|----------|
 | Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |         |
 | GameCube      | `.gj`       | `n.rel`           | `.gvm`        |         |
