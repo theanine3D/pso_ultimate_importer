@@ -12,15 +12,19 @@ Currently, the addon supports the following formats:
 
 | Platform      | Actors | Stages | Textures | Archives |
 |---------------|-------------|------------------|---------------|----------|
-| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |         |
-| GameCube      | `.gj`       | `n.rel`           | `.gvm`        |         |
-| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |`.bml`   |
+| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |   `.gsl`      |
+| GameCube      | `.gj`       | `n.rel`           | `.gvm`        |   `.gsl`      |
+| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |`.bml`,`.gsl`  
 
 Import settings allow you to customize some quality-of-life features.
 - **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
 - **Disable Color Correction** - adjusts the Color Management settings in your scene to sRGB / Standard, so colors match the original colors from PSO
 - **Extend Viewport Clip Distance** - increases the clipping distance in your scene just enough so that the model is immediately visible, no matter how large it might be
 - **Attempt Sky Import** - tries to automatically import a matching skybox file (if found) from the same folder as the n.rel stage file being imported
+
+You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "PSO" tab. This will allow you to extract all of a GSL file's contents to a specified folder, without directly importing them into your Blender scene.
+<img width="367" height="221" alt="image" src="https://github.com/user-attachments/assets/b60c0a59-4b96-4294-9764-6c2056cf7134" />
+
 
 Currently *not* supported:
 - Animations / skeletons
