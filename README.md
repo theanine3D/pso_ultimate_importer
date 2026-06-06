@@ -24,7 +24,7 @@ Import settings allow you to customize some quality-of-life features.
 
 You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "PSO" tab. This will allow you to extract all of a GSL file's contents to a specified folder, without directly importing them into your Blender scene.
 <p align="center">
-<img width="367" height="221" alt="image" src="https://github.com/user-attachments/assets/19863cc1-f7de-4256-9b89-c7e1ad228227" />
+   <img width="367" height="221" alt="image" src="https://github.com/user-attachments/assets/06387cde-bc0d-4195-847b-f6137393e30f" />
 </p>
 
 
