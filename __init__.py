@@ -15,8 +15,8 @@ import math
 import struct
 import os
 from bpy_extras.io_utils import ImportHelper
-from bpy.props import StringProperty, BoolProperty, EnumProperty
-from bpy.types import Operator
+from bpy.props import StringProperty, BoolProperty, EnumProperty, PointerProperty
+from bpy.types import Operator, Panel, PropertyGroup
 
 # ============================================================
 # Magic numbers
@@ -3588,6 +3588,142 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
 
 
 # ============================================================
+# GSL archive parser
+# ============================================================
+def gsl_read_archive(filepath):
+    """Parse a GSL archive and return a list of {'filename': str, 'data': bytes}."""
+    with open(filepath, 'rb') as fp:
+        fp.seek(0, os.SEEK_END)
+        file_size = fp.tell()
+        fp.seek(0)
+
+        entries = []
+        data_start = file_size  # will shrink as we read the table
+        while fp.tell() < data_start:
+            raw = fp.read(0x28)
+            if len(raw) < 0x28:
+                break
+            name_bytes, offset_sector, length = struct.unpack_from('<32sII', raw)
+            fp.read(0x08)  # 8 bytes padding after each table entry
+
+            name = name_bytes.decode('ascii').rstrip(' \t\r\n\0')
+            if not name:
+                break
+
+            offset = offset_sector * 2048
+            if offset < data_start:
+                data_start = offset
+            entries.append({'filename': name, 'offset': offset, 'length': length})
+
+        result = []
+        for e in entries:
+            fp.seek(e['offset'])
+            result.append({'filename': e['filename'], 'data': fp.read(e['length'])})
+
+    return result
+
+
+# ============================================================
+# Sidebar panel properties
+# ============================================================
+class PSO_PG_panel_props(PropertyGroup):
+    gsl_filepath: StringProperty(
+        name="GSL File",
+        description="Path to the GSL archive to extract",
+        default="",
+        subtype='FILE_PATH',
+    )
+    gsl_output_dir: StringProperty(
+        name="Output Folder",
+        description="Directory where extracted files will be written",
+        default="",
+        subtype='DIR_PATH',
+    )
+
+
+# ============================================================
+# GSL extract operator
+# ============================================================
+class PSO_OT_extract_gsl(Operator):
+    bl_idname      = "pso.extract_gsl"
+    bl_label       = "Extract GSL"
+    bl_description = "Extract all files from the selected GSL archive to the output folder"
+
+    def execute(self, context):
+        props = context.scene.pso_panel
+
+        gsl_path = bpy.path.abspath(props.gsl_filepath).strip()
+        out_dir  = bpy.path.abspath(props.gsl_output_dir).strip()
+
+        if not gsl_path:
+            self.report({'ERROR'}, "No GSL file specified")
+            return {'CANCELLED'}
+        if not os.path.isfile(gsl_path):
+            self.report({'ERROR'}, "GSL file not found: %s" % gsl_path)
+            return {'CANCELLED'}
+        if not out_dir:
+            self.report({'ERROR'}, "No output folder specified")
+            return {'CANCELLED'}
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        try:
+            entries = gsl_read_archive(gsl_path)
+        except Exception as e:
+            self.report({'ERROR'}, "Failed to read GSL: %s" % e)
+            return {'CANCELLED'}
+
+        if not entries:
+            self.report({'WARNING'}, "GSL archive is empty or unreadable")
+            return {'CANCELLED'}
+
+        for entry in entries:
+            dest = os.path.join(out_dir, entry['filename'])
+            try:
+                with open(dest, 'wb') as f:
+                    f.write(entry['data'])
+            except OSError as e:
+                self.report({'WARNING'}, "Could not write %s: %s" % (entry['filename'], e))
+
+        self.report({'INFO'}, "Extracted %d file(s) to %s" % (len(entries), out_dir))
+        return {'FINISHED'}
+
+
+# ============================================================
+# Viewport sidebar panel
+# ============================================================
+class PSO_PT_sidebar(Panel):
+    bl_label       = "PSO Tools"
+    bl_idname      = "PSO_PT_sidebar"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = "PSO"
+
+    def draw(self, context):
+        pass   # sub-panels carry the content
+
+
+class PSO_PT_gsl_tools(Panel):
+    bl_label       = "GSL Extraction"
+    bl_idname      = "PSO_PT_gsl_tools"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = "PSO"
+    bl_parent_id   = "PSO_PT_sidebar"
+
+    def draw(self, context):
+        l     = self.layout
+        props = context.scene.pso_panel
+
+        l.label(text="GSL Archive:")
+        l.prop(props, "gsl_filepath", text="")
+        l.label(text="Output Folder:")
+        l.prop(props, "gsl_output_dir", text="")
+        l.separator()
+        l.operator("pso.extract_gsl", icon='EXPORT')
+
+
+# ============================================================
 # Menu hooks
 # ============================================================
 def menu_func_import(self, context):
@@ -3602,17 +3738,23 @@ _CLASSES = (
     IMPORT_OT_pso_actor,
     IMPORT_OT_pso_stage,
     IMPORT_OT_pso_bml,
+    PSO_PG_panel_props,
+    PSO_OT_extract_gsl,
+    PSO_PT_sidebar,
+    PSO_PT_gsl_tools,
 )
 
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.pso_panel = PointerProperty(type=PSO_PG_panel_props)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 def unregister():
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    del bpy.types.Scene.pso_panel
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
 
 if __name__ == "__main__":
     register()
