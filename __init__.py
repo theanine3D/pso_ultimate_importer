@@ -2952,6 +2952,40 @@ def find_gvm_path(filepath):
     return None
 
 
+def find_skybox_files(rel_filepath):
+    """Return (skybox_model_path, skybox_tex_path) for a given n.rel filepath.
+
+    Replaces the trailing 'n.rel' with 's.xj', 's.nj', or 's.gj' (tried in that
+    order). For the matching model, also checks for a companion texture archive
+    by trying '.xvm', '.pvm', '.gvm' (again in order).
+    Returns (None, None) if no skybox model is found.
+    """
+    if not rel_filepath.lower().endswith('n.rel'):
+        return None, None
+    base = rel_filepath[:-5]   # strip "n.rel"
+
+    sky_model_path = None
+    for model_suffix in ('s.xj', 's.nj', 's.gj'):
+        candidate = base + model_suffix
+        if os.path.exists(candidate):
+            sky_model_path = candidate
+            break
+
+    if sky_model_path is None:
+        return None, None
+
+    # Companion texture archive: same base + 's', try each tex extension
+    sky_tex_path = None
+    sky_base = base + 's'
+    for tex_ext in ('.xvm', '.pvm', '.gvm'):
+        candidate = sky_base + tex_ext
+        if os.path.exists(candidate):
+            sky_tex_path = candidate
+            break
+
+    return sky_model_path, sky_tex_path
+
+
 def find_compound_tex_path(model_filepath):
     """Check for a compound-extension texture archive beside a model file.
 
@@ -2975,6 +3009,78 @@ def find_compound_tex_path(model_filepath):
 def _common_props():
     """Returns a dict of property descriptors shared across all operators."""
     return {}   # used structurally below
+
+
+# ============================================================
+# Shared skybox import helper
+# ============================================================
+def _import_skybox(operator, rel_filepath, blend_vertex_colors, log_prefix):
+    """Attempt to find and import a skybox model beside the given n.rel file.
+
+    Reports INFO/WARNING through the operator.  Selects the correct geometry
+    parser based on the skybox file extension (.xj / .nj / .gj).
+    """
+    sky_model_path, sky_tex_path = find_skybox_files(rel_filepath)
+    if sky_model_path is None:
+        print("%s No skybox file found alongside %s" % (log_prefix, os.path.basename(rel_filepath)))
+        return None
+
+    # Load skybox textures
+    sky_textures = []
+    if sky_tex_path:
+        try:
+            with open(sky_tex_path, 'rb') as f:
+                raw = f.read()
+            sky_textures = load_texture_archive(raw)
+            msg = "Loaded %d skybox texture(s) from %s" % (
+                len(sky_textures), os.path.basename(sky_tex_path))
+            operator.report({'INFO'}, msg)
+            print("%s %s" % (log_prefix, msg))
+        except Exception as e:
+            operator.report({'WARNING'}, "Skybox texture load failed: %s" % e)
+            print("%s Skybox texture load failed: %s" % (log_prefix, e))
+
+    # Load skybox model data
+    try:
+        with open(sky_model_path, 'rb') as f:
+            sky_data = f.read()
+    except OSError as e:
+        operator.report({'WARNING'}, "Cannot open skybox: %s" % e)
+        return None
+
+    # Pick the right importer
+    ext = os.path.splitext(sky_model_path)[1].lower()
+    if ext == '.xj':
+        sky_geo = NinjaXJImporter()
+    elif ext == '.nj':
+        sky_geo = NinjaDCImporter()
+    else:   # .gj
+        sky_geo = FlipperGCImporter()
+
+    sky_geo.setTextures(sky_textures)
+    try:
+        sky_geo.parse(sky_data)
+    except Exception as e:
+        operator.report({'WARNING'}, "Skybox parse error: %s" % e)
+        print("%s Skybox parse error: %s" % (log_prefix, e))
+        return None
+
+    if not sky_geo.meshes_data:
+        operator.report({'WARNING'}, "Skybox parsed but contained no meshes")
+        return None
+
+    try:
+        sky_mesh_count = build_blender_scene(sky_geo, sky_model_path, blend_vertex_colors)
+    except Exception as e:
+        operator.report({'WARNING'}, "Skybox scene build error: %s" % e)
+        print("%s Skybox scene build error: %s" % (log_prefix, e))
+        return None
+
+    msg = "Imported skybox: %d mesh(es) from %s" % (
+        sky_mesh_count, os.path.basename(sky_model_path))
+    operator.report({'INFO'}, msg)
+    print("%s %s" % (log_prefix, msg))
+    return sky_geo
 
 
 # ============================================================
@@ -3020,6 +3126,15 @@ class IMPORT_OT_pso_rel(Operator, ImportHelper):
         default=True,
     )
 
+    import_skybox: BoolProperty(
+        name="Attempt Sky Import",
+        description=(
+            "Automatically look for a matching skybox file (s.xj / s.nj / s.gj) "
+            "in the same folder and import it alongside the stage"
+        ),
+        default=True,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.label(text="Texture Archive:")
@@ -3029,6 +3144,7 @@ class IMPORT_OT_pso_rel(Operator, ImportHelper):
         layout.prop(self, "blend_vertex_colors")
         layout.prop(self, "disable_color_correction")
         layout.prop(self, "extend_clip_distance")
+        layout.prop(self, "import_skybox")
 
     def execute(self, context):
         filepath = self.filepath
@@ -3094,6 +3210,12 @@ class IMPORT_OT_pso_rel(Operator, ImportHelper):
             except Exception as e:
                 self.report({'WARNING'}, "Could not set color management: %s" % e)
                 print("[PSO n.rel] Could not set color management: %s" % e)
+
+        # Skybox import
+        if self.import_skybox:
+            sky_geo = _import_skybox(self, filepath, self.blend_vertex_colors, "[PSO n.rel]")
+            if sky_geo and self.extend_clip_distance:
+                extend_clip_distance(sky_geo)
 
         result = "Imported %d mesh(es), %d texture(s) from %s" % (
             mesh_count, len(textures), os.path.basename(filepath)
@@ -3350,13 +3472,15 @@ class IMPORT_OT_pso_dc_rel(Operator, ImportHelper):
         description="Set Color Management to Standard")
     extend_clip_distance: BoolProperty(name="Extend Viewport Clip Distance", default=True,
         description="Raise Clip End so the stage is fully visible")
+    import_skybox: BoolProperty(name="Attempt Sky Import", default=True,
+        description="Automatically look for a matching skybox file (s.xj / s.nj / s.gj) in the same folder")
 
     def draw(self, context):
         l = self.layout
         l.label(text="Texture Archive (.pvm):"); l.prop(self, "xvm_filepath", text="")
         l.label(text="(leave blank to auto-detect)"); l.separator()
         l.prop(self, "blend_vertex_colors"); l.prop(self, "disable_color_correction")
-        l.prop(self, "extend_clip_distance")
+        l.prop(self, "extend_clip_distance"); l.prop(self, "import_skybox")
 
     def execute(self, context):
         filepath = self.filepath
@@ -3394,6 +3518,11 @@ class IMPORT_OT_pso_dc_rel(Operator, ImportHelper):
         if self.disable_color_correction:
             try: context.scene.view_settings.view_transform = "Standard"
             except Exception: pass
+
+        if self.import_skybox:
+            sky_geo = _import_skybox(self, filepath, self.blend_vertex_colors, "[PSO DC .rel]")
+            if sky_geo and self.extend_clip_distance:
+                extend_clip_distance(sky_geo)
 
         self.report({'INFO'}, "Imported %d mesh(es), %d tex from %s" % (
             mesh_count, len(textures), os.path.basename(filepath)))
@@ -3494,6 +3623,8 @@ class IMPORT_OT_pso_gc_rel(Operator, ImportHelper):
         description="Set Color Management to Standard")
     extend_clip_distance: BoolProperty(name="Extend Viewport Clip Distance", default=True,
         description="Raise Clip End so the stage is fully visible")
+    import_skybox: BoolProperty(name="Attempt Sky Import", default=True,
+        description="Automatically look for a matching skybox file (s.xj / s.nj / s.gj) in the same folder")
 
     def draw(self, context):
         l = self.layout
@@ -3501,7 +3632,7 @@ class IMPORT_OT_pso_gc_rel(Operator, ImportHelper):
         l.prop(self, "xvm_filepath", text="")
         l.label(text="(leave blank to auto-detect)"); l.separator()
         l.prop(self, "blend_vertex_colors"); l.prop(self, "disable_color_correction")
-        l.prop(self, "extend_clip_distance")
+        l.prop(self, "extend_clip_distance"); l.prop(self, "import_skybox")
 
     def execute(self, context):
         filepath = self.filepath
@@ -3540,6 +3671,11 @@ class IMPORT_OT_pso_gc_rel(Operator, ImportHelper):
         if self.disable_color_correction:
             try: context.scene.view_settings.view_transform = "Standard"
             except Exception: pass
+
+        if self.import_skybox:
+            sky_geo = _import_skybox(self, filepath, self.blend_vertex_colors, "[PSO GC .rel]")
+            if sky_geo and self.extend_clip_distance:
+                extend_clip_distance(sky_geo)
 
         self.report({'INFO'}, "Imported %d mesh(es), %d tex from %s" % (
             mesh_count, len(textures), os.path.basename(filepath)))
