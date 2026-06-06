@@ -49,7 +49,7 @@ You can find the importers via Blender's "_FIle_" -> "_Import_" menu.
 
 <img width="589" height="364" alt="promo2" src="https://github.com/user-attachments/assets/765c1ae4-75cd-43b5-815c-dd2554868452" />
 
-Support for importing .NJ and .XJ actor models
+Support for importing .NJ, .GJ, and .XJ actor models
 
 <img width="834" height="482" alt="promo3" src="https://github.com/user-attachments/assets/028c9a3e-674c-4142-a0b9-2a725410a091" />
 
