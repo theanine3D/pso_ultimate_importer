@@ -1,7 +1,7 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
@@ -66,6 +66,32 @@ NJD_CS_UVN_VN=68; NJD_CS_UVH_VN=69; NJD_CS_D8=70
 NJD_CS_UVN_D8=71; NJD_CS_UVH_D8=72; NJD_CS_2=73
 NJD_CS_UVN2=74; NJD_CS_UVH2=75
 CHUNK_STRIP = list(range(64, 76))
+
+# Per-vertex byte sizes for each NJD_CV_* chunk type (ch 32-50).
+# Formula: 12 (pos) + 4 (SH padding) + 4 (packed-normal for VNX) or 12 (float normal)
+#           + 4 (SH normal padding) + 4 (color for D8) + 4 (nofs+pad for NF).
+# Used by GC readChunks disambiguation to validate candidate vertex-chunk lengths.
+_GC_VERTEX_SIZE = {
+    32: 16,   # NJD_CV_SH      pos(12)+w(4)
+    33: 32,   # NJD_CV_VN_SH   pos(12)+w(4)+norm(12)+w(4)
+    34: 12,   # NJD_CV
+    35: 16,   # NJD_CV_D8      pos(12)+color(4)
+    36: 12,   # NJD_CV_UF
+    37: 12,   # NJD_CV_NF
+    38: 12,   # NJD_CV_S5
+    39: 12,   # NJD_CV_S4
+    40: 12,   # NJD_CV_IN
+    41: 24,   # NJD_CV_VN      pos(12)+norm(12)
+    42: 28,   # NJD_CV_VN_D8   pos(12)+norm(12)+color(4)
+    43: 24,   # NJD_CV_VN_UF   pos(12)+norm(12)
+    44: 28,   # NJD_CV_VN_NF   pos(12)+norm(12)+nofs(2)+pad(2)
+    45: 24,   # NJD_CV_VN_S5
+    46: 24,   # NJD_CV_VN_S4
+    47: 24,   # NJD_CV_VN_IN
+    48: 16,   # NJD_CV_VNX     pos(12)+packed-norm(4)
+    49: 20,   # NJD_CV_VNX_D8  pos(12)+packed-norm(4)+color(4)
+    50: 16,   # NJD_CV_VNX_UF  pos(12)+packed-norm(4)
+}
 
 # ============================================================
 # Binary stream
@@ -1735,13 +1761,20 @@ class NinjaChunkMixin:
                 break   # not enough bytes left for any chunk header
             if gc:
                 # GC big-endian NJ: chunk header words are stored BE.
-                # "No-length" chunk types (NJD_CN/CE, BITS 0x02-0x03, TINY 0x10-0x1F):
+                # "No-length" chunk types (NJD_CN/CE, BITS, TINY, STRIP, VOLUME, MATERIAL):
                 #   first BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
-                # "With-length" chunk types (VERTEX only in practice):
-                #   first BE uint16  = length word (discarded by handlers)
+                #   the individual handlers then read a length word on their own.
+                # "With-length" chunk types (VERTEX only):
+                #   first BE uint16  = length word
                 #   second BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
-                # All other types (TINY, MATERIAL, STRIP, VOLUME) put ch_cf first,
-                # then a length word (handled by the individual chunk methods).
+                #
+                # Disambiguation problem: a vertex chunk's length word has its LOW BYTE
+                # equal to (4 + vcount*vsz) / 4, which can land in the TINY (8-9, 16-31)
+                # or BITS (1-5) range for small vcount values.  When that happens the
+                # heuristic below would misidentify the length word as a no-len ch_cf.
+                # Guard against this by peeking at the NEXT word whenever ch_cand falls
+                # in CHUNK_TINY or CHUNK_BITS: if that word's low byte is a VERTEX type
+                # we know word0 was actually the length of a vertex chunk.
                 word0 = bs.readUShort()
                 ch_cand = word0 & 0xFF
                 no_len = (ch_cand == 0 or ch_cand == 0xFF or
@@ -1750,7 +1783,62 @@ class NinjaChunkMixin:
                           ch_cand in CHUNK_STRIP or
                           ch_cand in CHUNK_VOLUME or
                           0x10 <= ch_cand <= 0x1F)
-                if no_len:
+                if no_len and ch_cand not in (0, 0xFF):
+                    # Disambiguation: in GC format every vertex chunk is preceded
+                    # by a length word whose low byte can coincide with any no-len
+                    # chunk type (TINY=8-9, BITS=1-5, STRIP=64-75, VOLUME=56-58,
+                    # MATERIAL=17-23, etc.).  Peek at the next word: if its low
+                    # byte is a VERTEX chunk type (32-50) then word0 was the
+                    # vertex-chunk length, not a no-len ch_cf.
+                    if bs.pos + 2 <= bs.getSize():
+                        peek_pos = bs.pos
+                        word1_peek = bs.readUShort()
+                        vc_ch = word1_peek & 0xFF
+                        if vc_ch in CHUNK_VERTEX:
+                            # Candidate: word0 is the vertex-chunk length, word1 is ch_cf.
+                            # Validate with two conditions:
+                            #  1. (word0*4 - 4) must be divisible by the per-vertex size.
+                            #  2. The expected vcount must equal the actual vcount word in
+                            #     the stream (immediately after word1).
+                            # Together these reject false positives where a STRIP ch_cf is
+                            # followed by a clen whose low byte falls in the VERTEX range
+                            # (e.g. NJD_CS_UVN with clen=288 whose low byte is 0x20=32).
+                            vsz = _GC_VERTEX_SIZE.get(vc_ch, 12)
+                            body_bytes = word0 * 4 - 4   # bytes of data after vcount+vofs
+                            is_vertex = False
+                            if body_bytes > 0 and body_bytes % vsz == 0:
+                                exp_vcount = body_bytes // vsz
+                                if bs.pos + 2 <= bs.getSize():
+                                    vcount_pos = bs.pos          # position of vcount word
+                                    actual_vcount = bs.readUShort()
+                                    if actual_vcount == exp_vcount:
+                                        # Confirmed vertex chunk.
+                                        # Restore to vcount_pos so _vChunk can read it.
+                                        bs.seek(vcount_pos)
+                                        is_vertex = True
+                                    else:
+                                        # Mismatch → false positive.
+                                        bs.seek(peek_pos)
+                            if is_vertex:
+                                # word0 was the vertex-chunk length; word1 is the ch_cf.
+                                # bs is positioned at vcount — _vChunk will read from here.
+                                no_len = False
+                                ch = vc_ch
+                                cf = (word1_peek >> 8) & 0xFF
+                            else:
+                                # False positive — word0 really was the no-len ch_cf
+                                bs.seek(peek_pos)
+                                ch = ch_cand
+                                cf = (word0 >> 8) & 0xFF
+                        else:
+                            bs.seek(peek_pos)   # restore — word0 really was ch_cf
+                            ch = ch_cand
+                            cf = (word0 >> 8) & 0xFF
+                    else:
+                        ch = ch_cand
+                        cf = (word0 >> 8) & 0xFF
+                elif no_len:
+                    # ch_cand is 0 (NULL) or 0xFF (END) — unambiguous
                     ch = ch_cand
                     cf = (word0 >> 8) & 0xFF
                 else:
@@ -1823,7 +1911,16 @@ class NinjaChunkMixin:
                 v['color'] = (r2, g2, b2, a2)
 
             if ch == NJD_CV_VN_NF:
-                nofs = bs.readShort(); bs.readShort()
+                # NJD_CV_VN_NF has a 4-byte field: [nofs (int16), padding (int16)].
+                # In GC big-endian NJ, the 4-byte word swap (each uint32 is byte-reversed
+                # relative to LE) swaps the two 16-bit halves, so the layout becomes
+                # [padding, nofs] instead of [nofs, padding].
+                if bs._e == '>':
+                    bs.readShort()           # padding (skip)
+                    nofs = bs.readShort()    # actual nofs
+                else:
+                    nofs = bs.readShort()    # nofs
+                    bs.readShort()           # padding (skip)
                 key  = str(vofs + nofs)
                 # Use the stream position (already transformed to world space by the
                 # current bone's matrix). Borrowing the world-space position from a
