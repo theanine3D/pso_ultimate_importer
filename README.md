@@ -20,6 +20,7 @@ Import settings allow you to customize some quality-of-life features.
 - **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
 - **Disable Color Correction** - adjusts the Color Management settings in your scene to sRGB / Standard, so colors match the original colors from PSO
 - **Extend Viewport Clip Distance** - increases the clipping distance in your scene just enough so that the model is immediately visible, no matter how large it might be
+- **Attempt Sky Import** - tries to automatically import a matching skybox file (if found) from the same folder as the n.rel stage file being imported
 
 Currently *not* supported:
 - Animations / skeletons
