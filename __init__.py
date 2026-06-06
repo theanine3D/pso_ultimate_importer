@@ -5,10 +5,7 @@ bl_info = {
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
-        "Import Phantasy Star Online model and stage files: "
-        "DC .nj / DC .rel (Dreamcast), "
-        "BB .xj / BB n.rel (Blue Burst), "
-        "GC .gj / GC n.rel (GameCube)"
+        "Import Phantasy Star Online model and stage files"
     ),
     "category": "Import-Export",
 }
@@ -2214,12 +2211,21 @@ class NinjaDCImporter(NinjaChunkMixin):
         # extra addend that must be subtracted before the offsets are usable.
         # POF0 lists exactly which 32-bit words in the NJCM payload are pointers
         # so we can patch them without guessing the struct layout.
+        #
+        # Some files contain TWO POF0 chunks: a small one before the NJCM that
+        # relocates NJTL pointers, and a larger one AFTER the NJCM that relocates
+        # the bone/mesh pointers inside NJCM.  Always prefer the POF0 whose
+        # payload starts after the NJCM ends; fall back to the first one if no
+        # such chunk exists.
         pof0_chunks = chunk_map.get(MAGIC_POF0, [])
 
         for off, clen in chunk_map.get(MAGIC_NJCM, []):
             njcm_bytes = data[off : off + clen]
             if pof0_chunks:
-                pof0_off, pof0_clen = pof0_chunks[0]
+                njcm_end = off + clen
+                # Prefer the POF0 that follows the NJCM in the file
+                after = [(po, pc) for po, pc in pof0_chunks if po > njcm_end]
+                pof0_off, pof0_clen = after[0] if after else pof0_chunks[0]
                 pof0_bytes = data[pof0_off : pof0_off + pof0_clen]
                 njcm_bytes = apply_pof0_relocation(njcm_bytes, pof0_bytes, big_endian)
             self.bs = BitStream(njcm_bytes, big_endian=big_endian)
@@ -2985,9 +2991,8 @@ class IMPORT_OT_pso_rel(Operator, ImportHelper):
 
     xvm_filepath: StringProperty(
         name="Texture Archive (.xvm)",
-        description="Path to the .xvm texture archive. Leave blank to auto-detect",
+        description="Filename of the .xvm texture archive in the same folder (e.g. stage.xvm). Leave blank to auto-detect",
         default="",
-        subtype='FILE_PATH',
     )
 
     blend_vertex_colors: BoolProperty(
@@ -3037,7 +3042,9 @@ class IMPORT_OT_pso_rel(Operator, ImportHelper):
             return {'CANCELLED'}
 
         # Resolve .xvm path: manual override > auto-detect
-        xvm_path = self.xvm_filepath.strip() or find_xvm_path(filepath)
+        manual_name = self.xvm_filepath.strip()
+        xvm_path = (os.path.join(os.path.dirname(filepath), manual_name) if manual_name
+                    else find_xvm_path(filepath))
 
         textures = []
         if xvm_path and os.path.exists(xvm_path):
@@ -3109,9 +3116,8 @@ class IMPORT_OT_pso_xj(Operator, ImportHelper):
 
     xvm_filepath: StringProperty(
         name="Texture Archive (.xvm)",
-        description="Path to the .xvm texture archive. Leave blank to auto-detect",
+        description="Filename of the .xvm texture archive in the same folder (e.g. model.xvm). Leave blank to auto-detect",
         default="",
-        subtype='FILE_PATH',
     )
 
     blend_vertex_colors: BoolProperty(
@@ -3161,8 +3167,12 @@ class IMPORT_OT_pso_xj(Operator, ImportHelper):
             self.report({'ERROR'}, "Cannot open file: %s" % e)
             return {'CANCELLED'}
 
-        # XJ texture archive: compound extension first, then same base name
-        tex_path = self.xvm_filepath.strip()
+        # XJ texture archive: manual filename > compound extension > same base name
+        manual_name = self.xvm_filepath.strip()
+        if manual_name:
+            tex_path = os.path.join(os.path.dirname(filepath), manual_name)
+        else:
+            tex_path = None
         if not tex_path:
             tex_path = find_compound_tex_path(filepath)
         if not tex_path:
@@ -3240,7 +3250,8 @@ def _make_pvm_operator_body(operator, context, geo_class, file_data,
     uses the .gvm extension (e.g. 'model.nj.gvm') are also picked up.
     load_texture_archive() auto-detects PVMH vs GVMH, so either format works.
     """
-    manual = operator.xvm_filepath.strip()
+    manual_name = operator.xvm_filepath.strip()
+    manual = os.path.join(os.path.dirname(filepath), manual_name) if manual_name else None
     tex_path = (manual
                 or find_compound_tex_path(filepath)
                 or find_pvm_path(filepath)
@@ -3274,8 +3285,8 @@ class IMPORT_OT_pso_nj(Operator, ImportHelper):
     filename_ext = ".nj"
     filter_glob: StringProperty(default="*.nj", options={'HIDDEN'})
     xvm_filepath: StringProperty(name="Texture Archive (.pvm)",
-        description="Path to .pvm archive (leave blank to auto-detect)",
-        default="", subtype='FILE_PATH')
+        description="Filename of the .pvm archive in the same folder (e.g. model.pvm). Leave blank to auto-detect",
+        default="")
     blend_vertex_colors: BoolProperty(name="Blend Vertex Colors", default=True,
         description="Apply vertex colors as lighting in the scene")
     disable_color_correction: BoolProperty(name="Disable Color Correction", default=True,
@@ -3331,8 +3342,8 @@ class IMPORT_OT_pso_dc_rel(Operator, ImportHelper):
     filename_ext = ".rel"
     filter_glob: StringProperty(default="*[nd].rel", options={'HIDDEN'})
     xvm_filepath: StringProperty(name="Texture Archive (.pvm)",
-        description="Path to .pvm archive (leave blank to auto-detect)",
-        default="", subtype='FILE_PATH')
+        description="Filename of the .pvm archive in the same folder (e.g. stage.pvm). Leave blank to auto-detect",
+        default="")
     blend_vertex_colors: BoolProperty(name="Blend Vertex Colors", default=True,
         description="Apply vertex colors as lighting in the scene")
     disable_color_correction: BoolProperty(name="Disable Color Correction", default=True,
@@ -3401,8 +3412,8 @@ class IMPORT_OT_pso_gj(Operator, ImportHelper):
     filename_ext = ".gj"
     filter_glob: StringProperty(default="*.gj", options={'HIDDEN'})
     xvm_filepath: StringProperty(name="Texture Archive (.gvm)",
-        description="Path to .gvm archive (leave blank to auto-detect)",
-        default="", subtype='FILE_PATH')
+        description="Filename of the .gvm archive in the same folder (e.g. model.gvm). Leave blank to auto-detect",
+        default="")
     blend_vertex_colors: BoolProperty(name="Blend Vertex Colors (Modulate 2X)", default=False,
         description="Apply vertex colors as lighting in the scene")
     disable_color_correction: BoolProperty(name="Disable Color Correction", default=True,
@@ -3425,9 +3436,9 @@ class IMPORT_OT_pso_gj(Operator, ImportHelper):
         except OSError as e:
             self.report({'ERROR'}, "Cannot open: %s" % e); return {'CANCELLED'}
 
-        gvm_path = (self.xvm_filepath.strip()
-                    or find_compound_tex_path(filepath)
-                    or find_gvm_path(filepath))
+        manual_name = self.xvm_filepath.strip()
+        gvm_path = (os.path.join(os.path.dirname(filepath), manual_name) if manual_name
+                    else find_compound_tex_path(filepath) or find_gvm_path(filepath))
         textures = []
         if gvm_path and os.path.exists(gvm_path):
             try:
