@@ -40,6 +40,11 @@ Currently, this addon does *not* support:
    
 You can find the importers via Blender's "_FIle_" -> "_Import_" menu.
 
+## Tips
+- Blue Burst stored many of its 3D assets in a large archive named "data.gsl", which is located in the root "data" directory. You can use the GSL extractor in this addon (see above) to extract all the files from data.gsl, and then you'll find many .bml for enemies, bosses, and NPCs  that you can import directly.
+- BML files often contain more than 1 model. When you import a BML, you'll often see multiple models/characters/enemies jumbled together in the middle of your Blender scene. To isolate the one you want, turn off all of the collections in the Outliner, and enable only one collection at a time, so you can see each one clearly.
+- This addon will setup most materials for you automatically. However, any materials with blended transparency, emissive effects, or animations will still require manual setup.
+
 ## Previews
 
 <img width="589" height="364" alt="promo2" src="https://github.com/user-attachments/assets/765c1ae4-75cd-43b5-815c-dd2554868452" />
