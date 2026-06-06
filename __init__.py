@@ -15,7 +15,7 @@ import math
 import struct
 import os
 from bpy_extras.io_utils import ImportHelper
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy.types import Operator
 
 # ============================================================
@@ -2871,84 +2871,62 @@ def extend_clip_distance(geo):
 # ============================================================
 # XVM auto-detection
 # ============================================================
-def find_xvm_path(rel_filepath):
+def find_tex_archive(filepath, platform='BB'):
+    """Locate a texture archive (.xvm / .pvm / .gvm) for a model or stage file.
+
+    Builds a list of stem candidates by stripping known suffixes from the
+    filename, then tries each archive extension in a platform-priority order:
+        BB  →  .xvm, .pvm, .gvm
+        DC  →  .pvm, .xvm, .gvm
+        GC  →  .gvm, .xvm, .pvm
+
+    Name-based matches are tried first (all candidates × all extensions in
+    priority order), then a single-archive-in-directory fallback.
+
+    Stem candidate logic covers:
+      - Bare stem:              model.nj  →  model
+      - Trailing type letter:   forest01n.rel  →  forest01  (n/d/c/r stripped)
+      - Underscore+digit suffix: forest_01  →  forest  (BB stage convention)
     """
-    Return the best-guess .xvm path for a given n.rel path, or None.
+    stem      = os.path.splitext(filepath)[0]
+    directory = os.path.dirname(filepath)
 
-    PSO BB stage files follow naming conventions like:
-        forest_01n.rel  ->  forest.xvm   (2-digit suffix: [-3] == '_')
-        city01_0n.rel   ->  city01.xvm   (1-digit suffix: [-2] == '_')
-        lobbn.rel       ->  lobb.xvm     (no suffix)
+    # Build ordered list of name stems to try, most-specific first.
+    stems = []
+    if stem and stem[-1] in ('n', 'd', 'c', 'r'):
+        base = stem[:-1]
+        stems.append(base)
+        # BB stage convention: strip underscore+digit suffix of length 1–3
+        for strip in range(1, 4):
+            if len(base) >= strip and base[-strip] == '_':
+                stems.append(base[:-strip])
+    stems.append(stem)
 
-    We try every plausible strip length rather than hard-coding one rule,
-    then fall back to any single .xvm found in the same directory.
-    """
-    # Strip the trailing "n.rel" (5 chars) to get the base stem
-    stem = rel_filepath[:-5]          # e.g. ".../forest_01"
-    directory = os.path.dirname(rel_filepath)
+    # Extension priority order by platform
+    if platform == 'GC':
+        exts = ('.gvm', '.xvm', '.pvm')
+    elif platform == 'DC':
+        exts = ('.pvm', '.xvm', '.gvm')
+    else:  # BB (default)
+        exts = ('.xvm', '.pvm', '.gvm')
 
-    candidates = []
+    # Name-based search: for each extension in priority order, try every stem
+    for ext in exts:
+        for s in stems:
+            p = s + ext
+            if os.path.exists(p):
+                return p
 
-    # Try stripping underscore+suffix of length 1, 2, or 3 from the stem
-    for strip in range(1, 4):
-        if len(stem) > strip and stem[-(strip)] == '_':
-            candidates.append(stem[:-(strip)] + ".xvm")
-
-    # Try the stem itself (no suffix stripping)
-    candidates.append(stem + ".xvm")
-
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-
-    # Last resort: find the only .xvm in the same directory
+    # Directory fallback: return a lone archive of the highest-priority type
     try:
-        xvms = [f for f in os.listdir(directory) if f.lower().endswith('.xvm')]
-        if len(xvms) == 1:
-            return os.path.join(directory, xvms[0])
+        dir_files = os.listdir(directory)
     except OSError:
-        pass
+        dir_files = []
+    for ext in exts:
+        matches = [f for f in dir_files if f.lower().endswith(ext)]
+        if len(matches) == 1:
+            return os.path.join(directory, matches[0])
 
-    return None
-
-
-def find_pvm_path(filepath):
-    """Locate a .pvm texture archive for a DC .nj or DC .rel file."""
-    stem = os.path.splitext(filepath)[0]
-    # DC .rel files end in [d|n|c|r].rel — try stripping the type letter
-    if stem and stem[-1] in ('d', 'n', 'c', 'r'):
-        base = stem[:-1]
-        for p in (base + ".pvm", stem + ".pvm"):
-            if os.path.exists(p): return p
-    else:
-        p = stem + ".pvm"
-        if os.path.exists(p): return p
-    # Fallback: only .pvm in same directory
-    try:
-        d   = os.path.dirname(filepath)
-        pvms = [f for f in os.listdir(d) if f.lower().endswith('.pvm')]
-        if len(pvms) == 1: return os.path.join(d, pvms[0])
-    except OSError: pass
-    return None
-
-
-def find_gvm_path(filepath):
-    """Locate a .gvm texture archive for a GC .gj model or GC n.rel stage file."""
-    stem = os.path.splitext(filepath)[0]
-    # GC n.rel files end in 'n' before the extension — try stripping it
-    if stem and stem[-1] == 'n':
-        base = stem[:-1]
-        for p in (base + ".gvm", stem + ".gvm"):
-            if os.path.exists(p): return p
-    else:
-        p = stem + ".gvm"
-        if os.path.exists(p): return p
-    # Fallback: only .gvm in same directory
-    try:
-        d    = os.path.dirname(filepath)
-        gvms = [f for f in os.listdir(d) if f.lower().endswith('.gvm')]
-        if len(gvms) == 1: return os.path.join(d, gvms[0])
-    except OSError: pass
     return None
 
 
@@ -3083,608 +3061,306 @@ def _import_skybox(operator, rel_filepath, blend_vertex_colors, log_prefix):
     return sky_geo
 
 
+_PLATFORM_ITEMS = [
+    ('BB', "Blue Burst (PC)",  "Phantasy Star Online Blue Burst (.xj / n.rel / .xvm)"),
+    ('DC', "Dreamcast (DC)",   "Phantasy Star Online v2 (.nj / n.rel / .pvm)"),
+    ('GC', "GameCube (GC)",    "Phantasy Star Online Episode I, II, and III (.gj / n.rel / .gvm)"),
+]
+
 # ============================================================
-# Blender Import Operator — PSO BB n.rel
+# PSO Actor Model operator  (.xj / .nj / .gj)
 # ============================================================
-class IMPORT_OT_pso_rel(Operator, ImportHelper):
-    bl_idname      = "import_scene.pso_rel"
-    bl_label       = "Import PSO n.rel"
-    bl_description = "Import a Phantasy Star Online Blue Burst n.rel stage file"
+class IMPORT_OT_pso_actor(Operator, ImportHelper):
+    bl_idname      = "import_scene.pso_actor"
+    bl_label       = "PSO Actor Model"
+    bl_description = "Import a Phantasy Star Online character or prop model (.xj / .nj / .gj)"
     bl_options     = {'REGISTER', 'UNDO'}
 
-    filename_ext = ".rel"
-    filter_glob: StringProperty(default="*n.rel", options={'HIDDEN'})
+    filename_ext = ""
+    filter_glob: StringProperty(default="*.xj;*.nj;*.gj", options={'HIDDEN'})
 
+    platform: EnumProperty(
+        name="Platform",
+        description="Which version of PSO the file comes from",
+        items=_PLATFORM_ITEMS,
+        default='BB',
+    )
     xvm_filepath: StringProperty(
-        name="Texture Archive (.xvm)",
-        description="Filename of the .xvm texture archive in the same folder (e.g. stage.xvm). Leave blank to auto-detect",
+        name="Texture Archive",
+        description="Texture archive in the same folder (.xvm / .pvm / .gvm). Leave blank to auto-detect",
         default="",
     )
-
     blend_vertex_colors: BoolProperty(
         name="Blend Vertex Colors",
-        description=(
-            "Apply vertex colors as lighting in the scene"
-        ),
+        description="Apply vertex colors as lighting in the scene",
         default=True,
     )
-
     disable_color_correction: BoolProperty(
         name="Disable Color Correction",
-        description=(
-            "Set the scene Color Management transform to Standard, disabling Filmic/AgX "
-            "tonemapping so textures match the original game's appearance"
-        ),
+        description="Set Color Management to Standard so textures match the original game's appearance",
         default=True,
     )
-
     extend_clip_distance: BoolProperty(
         name="Extend Viewport Clip Distance",
-        description=(
-            "Increase 3D Viewport's Clip End so the imported mesh is fully visible. "
-        ),
-        default=True,
-    )
-
-    import_skybox: BoolProperty(
-        name="Attempt Sky Import",
-        description=(
-            "Automatically look for a matching skybox file (s.xj / s.nj / s.gj) "
-            "in the same folder and import it alongside the stage"
-        ),
+        description="Raise Clip End so the imported model is fully visible",
         default=True,
     )
 
     def draw(self, context):
-        layout = self.layout
-        layout.label(text="Texture Archive:")
-        layout.prop(self, "xvm_filepath", text="")
-        layout.label(text="(leave blank to auto-detect)")
-        layout.separator()
-        layout.prop(self, "blend_vertex_colors")
-        layout.prop(self, "disable_color_correction")
-        layout.prop(self, "extend_clip_distance")
-        layout.prop(self, "import_skybox")
+        l = self.layout
+        l.prop(self, "platform")
+        l.separator()
+        ext = {'BB': '.xvm', 'DC': '.pvm', 'GC': '.gvm'}.get(self.platform, '')
+        l.label(text="Texture Archive (%s):" % ext)
+        l.prop(self, "xvm_filepath", text="")
+        l.label(text="(leave blank to auto-detect)")
+        l.separator()
+        l.prop(self, "blend_vertex_colors")
+        l.prop(self, "disable_color_correction")
+        l.prop(self, "extend_clip_distance")
 
     def execute(self, context):
         filepath = self.filepath
-
-        # Load the .rel file
         try:
             with open(filepath, 'rb') as f:
-                rel_data = f.read()
+                model_data = f.read()
         except OSError as e:
-            self.report({'ERROR'}, "Cannot open file: %s" % e)
+            self.report({'ERROR'}, "Cannot open: %s" % e)
             return {'CANCELLED'}
 
-        # Resolve .xvm path: manual override > auto-detect
+        platform = self.platform
+        label = "PSO %s Actor" % platform
+
+        # ── Resolve texture archive ──────────────────────────────────────────
         manual_name = self.xvm_filepath.strip()
-        xvm_path = (os.path.join(os.path.dirname(filepath), manual_name) if manual_name
-                    else find_xvm_path(filepath))
-
         textures = []
-        if xvm_path and os.path.exists(xvm_path):
-            try:
-                with open(xvm_path, 'rb') as f:
-                    xvr_data = f.read()
-                textures = xvr_load(xvr_data)
-                msg = "Loaded %d texture(s) from %s" % (len(textures), os.path.basename(xvm_path))
-                self.report({'INFO'}, msg)
-                print("[PSO n.rel] " + msg)
-            except Exception as e:
-                self.report({'WARNING'}, "Texture load failed: %s" % e)
-                print("[PSO n.rel] Texture load failed: %s" % e)
-        else:
-            tried = xvm_path or "(no candidate found)"
-            self.report({'WARNING'}, "XVM not found — tried: %s" % tried)
-            print("[PSO n.rel] XVM not found — tried: %s" % tried)
+        tex_path = (os.path.join(os.path.dirname(filepath), manual_name) if manual_name
+                    else find_compound_tex_path(filepath) or find_tex_archive(filepath, platform))
 
-        # Parse geometry
-        geo = NinjaStageGeometry()
-        geo.setTextures(textures)
-        try:
-            geo.parse(rel_data)
-        except Exception as e:
-            self.report({'ERROR'}, "Parse error: %s" % e)
-            print("[PSO n.rel] Parse error: %s" % e)
-            return {'CANCELLED'}
-
-        # Build Blender scene
-        try:
-            mesh_count = build_blender_scene(geo, filepath, self.blend_vertex_colors)
-        except Exception as e:
-            self.report({'ERROR'}, "Scene build error: %s" % e)
-            print("[PSO n.rel] Scene build error: %s" % e)
-            return {'CANCELLED'}
-
-        if self.extend_clip_distance:
-            extend_clip_distance(geo)
-
-        if self.blend_vertex_colors:
-            disable_eevee_shadows()
-
-        if self.disable_color_correction:
-            try:
-                context.scene.view_settings.view_transform = "Standard"
-                print("[PSO n.rel] Color management set to Standard")
-            except Exception as e:
-                self.report({'WARNING'}, "Could not set color management: %s" % e)
-                print("[PSO n.rel] Could not set color management: %s" % e)
-
-        # Skybox import
-        if self.import_skybox:
-            sky_geo = _import_skybox(self, filepath, self.blend_vertex_colors, "[PSO n.rel]")
-            if sky_geo and self.extend_clip_distance:
-                extend_clip_distance(sky_geo)
-
-        result = "Imported %d mesh(es), %d texture(s) from %s" % (
-            mesh_count, len(textures), os.path.basename(filepath)
-        )
-        self.report({'INFO'}, result)
-        print("[PSO n.rel] " + result)
-        return {'FINISHED'}
-
-# ============================================================
-# XJ Import Operator
-# ============================================================
-class IMPORT_OT_pso_xj(Operator, ImportHelper):
-    bl_idname      = "import_scene.pso_xj"
-    bl_label       = "Import PSO BB .xj"
-    bl_description = "Import a Phantasy Star Online Blue Burst .xj prop/character model file"
-    bl_options     = {'REGISTER', 'UNDO'}
-
-    filename_ext = ".xj"
-    filter_glob: StringProperty(default="*.xj", options={'HIDDEN'})
-
-    xvm_filepath: StringProperty(
-        name="Texture Archive (.xvm)",
-        description="Filename of the .xvm texture archive in the same folder (e.g. model.xvm). Leave blank to auto-detect",
-        default="",
-    )
-
-    blend_vertex_colors: BoolProperty(
-        name="Blend Vertex Colors",
-        description=(
-            "Apply vertex colors as lighting in the scene"
-        ),
-        default=True,
-    )
-
-    disable_color_correction: BoolProperty(
-        name="Disable Color Correction",
-        description=(
-            "Set the scene Color Management transform to Standard, disabling Filmic/AgX "
-            "tonemapping so textures match the original game's appearance"
-        ),
-        default=True,
-    )
-
-    extend_clip_distance: BoolProperty(
-        name="Extend Viewport Clip Distance",
-        description=(
-            "Increase every 3D Viewport's Clip End so the imported mesh is fully visible. "
-            "PSO models can exceed Blender's default clip distance of 1000"
-        ),
-        default=True,
-    )
-
-    def draw(self, context):
-        layout = self.layout
-        layout.label(text="Texture Archive:")
-        layout.prop(self, "xvm_filepath", text="")
-        layout.label(text="(leave blank to auto-detect)")
-        layout.separator()
-        layout.prop(self, "blend_vertex_colors")
-        layout.prop(self, "disable_color_correction")
-        layout.prop(self, "extend_clip_distance")
-
-    def execute(self, context):
-        filepath = self.filepath
-
-        # Load the .xj file
-        try:
-            with open(filepath, 'rb') as f:
-                xj_data = f.read()
-        except OSError as e:
-            self.report({'ERROR'}, "Cannot open file: %s" % e)
-            return {'CANCELLED'}
-
-        # XJ texture archive: manual filename > compound extension > same base name
-        manual_name = self.xvm_filepath.strip()
-        if manual_name:
-            tex_path = os.path.join(os.path.dirname(filepath), manual_name)
-        else:
-            tex_path = None
-        if not tex_path:
-            tex_path = find_compound_tex_path(filepath)
-        if not tex_path:
-            stem = os.path.splitext(filepath)[0]
-            xvm_candidate = stem + ".xvm"
-            pvm_candidate = stem + ".pvm"
-            if os.path.exists(xvm_candidate):
-                tex_path = xvm_candidate
-            elif os.path.exists(pvm_candidate):
-                tex_path = pvm_candidate
-
-        textures = []
         if tex_path and os.path.exists(tex_path):
             try:
                 with open(tex_path, 'rb') as f:
-                    tex_data = f.read()
-                textures = load_texture_archive(tex_data)
+                    raw = f.read()
+                textures = load_texture_archive(raw)
                 msg = "Loaded %d texture(s) from %s" % (len(textures), os.path.basename(tex_path))
                 self.report({'INFO'}, msg)
-                print("[PSO .xj] " + msg)
+                print("[%s] %s" % (label, msg))
             except Exception as e:
                 self.report({'WARNING'}, "Texture load failed: %s" % e)
-                print("[PSO .xj] Texture load failed: %s" % e)
         else:
-            tried = tex_path or os.path.splitext(filepath)[0] + ".xvm/.pvm"
+            tried = tex_path or "(no texture archive found)"
             self.report({'WARNING'}, "Texture archive not found — tried: %s" % tried)
-            print("[PSO .xj] Texture archive not found — tried: %s" % tried)
+            print("[%s] Texture archive not found — tried: %s" % (label, tried))
 
-        # Parse geometry
-        geo = NinjaXJImporter()
+        # ── Parse geometry ───────────────────────────────────────────────────
+        if platform == 'BB':
+            geo = NinjaXJImporter()
+        elif platform == 'DC':
+            geo = NinjaDCImporter()
+        else:
+            geo = FlipperGCImporter()
         geo.setTextures(textures)
         try:
-            geo.parse(xj_data)
+            geo.parse(model_data)
         except Exception as e:
             self.report({'ERROR'}, "Parse error: %s" % e)
-            print("[PSO .xj] Parse error: %s" % e)
             return {'CANCELLED'}
 
-        # Build Blender scene
+        # ── Build scene ──────────────────────────────────────────────────────
         try:
             mesh_count = build_blender_scene(geo, filepath, self.blend_vertex_colors)
         except Exception as e:
             self.report({'ERROR'}, "Scene build error: %s" % e)
-            print("[PSO .xj] Scene build error: %s" % e)
             return {'CANCELLED'}
 
         if self.extend_clip_distance:
             extend_clip_distance(geo)
-
         if self.blend_vertex_colors:
             disable_eevee_shadows()
-
         if self.disable_color_correction:
             try:
                 context.scene.view_settings.view_transform = "Standard"
-            except Exception as e:
-                self.report({'WARNING'}, "Could not set color management: %s" % e)
+            except Exception:
+                pass
 
-        result = "Imported %d mesh(es), %d texture(s) from %s" % (
-            mesh_count, len(textures), os.path.basename(filepath)
-        )
-        self.report({'INFO'}, result)
-        print("[PSO .xj] " + result)
-        return {'FINISHED'}
-
-
-# ============================================================
-# Helper: build a standard operator draw/execute body for DC/GC imports
-# ============================================================
-def _make_pvm_operator_body(operator, context, geo_class, file_data,
-                             filepath, label):
-    """Shared execute logic for DC .nj, DC .rel, and GC .gj operators.
-
-    Tries .pvm first, then .gvm, so GC NJ files whose companion texture archive
-    uses the .gvm extension (e.g. 'model.nj.gvm') are also picked up.
-    load_texture_archive() auto-detects PVMH vs GVMH, so either format works.
-    """
-    manual_name = operator.xvm_filepath.strip()
-    manual = os.path.join(os.path.dirname(filepath), manual_name) if manual_name else None
-    tex_path = (manual
-                or find_compound_tex_path(filepath)
-                or find_pvm_path(filepath)
-                or find_gvm_path(filepath))
-    textures = []
-    if tex_path and os.path.exists(tex_path):
-        try:
-            with open(tex_path, 'rb') as f:
-                raw = f.read()
-            textures = load_texture_archive(raw)
-            msg = "Loaded %d texture(s) from %s" % (len(textures), os.path.basename(tex_path))
-            operator.report({'INFO'}, msg); print("[%s] %s" % (label, msg))
-        except Exception as e:
-            operator.report({'WARNING'}, "Texture load failed: %s" % e)
-    else:
-        tried = tex_path or "(no .pvm / .gvm found)"
-        operator.report({'WARNING'}, "Texture archive not found — tried: %s" % tried)
-        print("[%s] Texture archive not found — tried: %s" % (label, tried))
-    return textures
-
-
-# ============================================================
-# PSO DC .nj model operator
-# ============================================================
-class IMPORT_OT_pso_nj(Operator, ImportHelper):
-    bl_idname      = "import_scene.pso_nj"
-    bl_label       = "Import PSO DC .nj"
-    bl_description = "Import a Phantasy Star Online Dreamcast .nj model file"
-    bl_options     = {'REGISTER', 'UNDO'}
-
-    filename_ext = ".nj"
-    filter_glob: StringProperty(default="*.nj", options={'HIDDEN'})
-    xvm_filepath: StringProperty(name="Texture Archive (.pvm)",
-        description="Filename of the .pvm archive in the same folder (e.g. model.pvm). Leave blank to auto-detect",
-        default="")
-    blend_vertex_colors: BoolProperty(name="Blend Vertex Colors", default=True,
-        description="Apply vertex colors as lighting in the scene")
-    disable_color_correction: BoolProperty(name="Disable Color Correction", default=True,
-        description="Set Color Management to Standard")
-    extend_clip_distance: BoolProperty(name="Extend Viewport Clip Distance", default=True,
-        description="Raise Clip End so the model is fully visible")
-
-    def draw(self, context):
-        l = self.layout
-        l.label(text="Texture Archive (.pvm):"); l.prop(self, "xvm_filepath", text="")
-        l.label(text="(leave blank to auto-detect)"); l.separator()
-        l.prop(self, "blend_vertex_colors"); l.prop(self, "disable_color_correction")
-        l.prop(self, "extend_clip_distance")
-
-    def execute(self, context):
-        filepath = self.filepath
-        try:
-            with open(filepath, 'rb') as f: nj_data = f.read()
-        except OSError as e:
-            self.report({'ERROR'}, "Cannot open: %s" % e); return {'CANCELLED'}
-
-        textures = _make_pvm_operator_body(self, context, None, nj_data, filepath, "PSO DC .nj")
-
-        geo = NinjaDCImporter(); geo.setTextures(textures)
-        try: geo.parse(nj_data)
-        except Exception as e:
-            self.report({'ERROR'}, "Parse error: %s" % e); return {'CANCELLED'}
-
-        try: mesh_count = build_blender_scene(geo, filepath, self.blend_vertex_colors)
-        except Exception as e:
-            self.report({'ERROR'}, "Scene build error: %s" % e); return {'CANCELLED'}
-
-        if self.extend_clip_distance: extend_clip_distance(geo)
-        if self.blend_vertex_colors: disable_eevee_shadows()
-        if self.disable_color_correction:
-            try: context.scene.view_settings.view_transform = "Standard"
-            except Exception: pass
-
-        self.report({'INFO'}, "Imported %d mesh(es), %d tex from %s" % (
+        self.report({'INFO'}, "Imported %d mesh(es), %d texture(s) from %s" % (
             mesh_count, len(textures), os.path.basename(filepath)))
         return {'FINISHED'}
 
 
 # ============================================================
-# PSO DC .rel stage operator
+# PSO Stage Model operator  (n.rel)
 # ============================================================
-class IMPORT_OT_pso_dc_rel(Operator, ImportHelper):
-    bl_idname      = "import_scene.pso_dc_rel"
-    bl_label       = "Import PSO DC .rel"
-    bl_description = "Import a Phantasy Star Online Dreamcast n.rel / d.rel stage file"
-    bl_options     = {'REGISTER', 'UNDO'}
-
-    filename_ext = ".rel"
-    filter_glob: StringProperty(default="*[nd].rel", options={'HIDDEN'})
-    xvm_filepath: StringProperty(name="Texture Archive (.pvm)",
-        description="Filename of the .pvm archive in the same folder (e.g. stage.pvm). Leave blank to auto-detect",
-        default="")
-    blend_vertex_colors: BoolProperty(name="Blend Vertex Colors", default=True,
-        description="Apply vertex colors as lighting in the scene")
-    disable_color_correction: BoolProperty(name="Disable Color Correction", default=True,
-        description="Set Color Management to Standard")
-    extend_clip_distance: BoolProperty(name="Extend Viewport Clip Distance", default=True,
-        description="Raise Clip End so the stage is fully visible")
-    import_skybox: BoolProperty(name="Attempt Sky Import", default=True,
-        description="Automatically look for a matching skybox file (s.xj / s.nj / s.gj) in the same folder")
-
-    def draw(self, context):
-        l = self.layout
-        l.label(text="Texture Archive (.pvm):"); l.prop(self, "xvm_filepath", text="")
-        l.label(text="(leave blank to auto-detect)"); l.separator()
-        l.prop(self, "blend_vertex_colors"); l.prop(self, "disable_color_correction")
-        l.prop(self, "extend_clip_distance"); l.prop(self, "import_skybox")
-
-    def execute(self, context):
-        filepath = self.filepath
-        # Auto-locate paired file: e.g. selecting foret_01n.rel also loads foret_01d.rel
-        stem = os.path.splitext(filepath)[0]
-        if stem and stem[-1] in ('n', 'd'):
-            base   = stem[:-1]
-            d_path = base + "d.rel"
-            n_path = base + "n.rel"
-        else:
-            d_path = n_path = filepath
-
-        def _load(p):
-            if os.path.exists(p):
-                with open(p, 'rb') as f: return f.read()
-            return None
-
-        d_data = _load(d_path); n_data = _load(n_path)
-        if d_data is None and n_data is None:
-            self.report({'ERROR'}, "Cannot find d.rel or n.rel"); return {'CANCELLED'}
-
-        textures = _make_pvm_operator_body(self, context, None, None, filepath, "PSO DC .rel")
-
-        geo = NinjaDCRelImporter(); geo.setTextures(textures)
-        try: geo.parse(d_data, n_data)
-        except Exception as e:
-            self.report({'ERROR'}, "Parse error: %s" % e); return {'CANCELLED'}
-
-        try: mesh_count = build_blender_scene(geo, filepath, self.blend_vertex_colors)
-        except Exception as e:
-            self.report({'ERROR'}, "Scene build error: %s" % e); return {'CANCELLED'}
-
-        if self.extend_clip_distance: extend_clip_distance(geo)
-        if self.blend_vertex_colors: disable_eevee_shadows()
-        if self.disable_color_correction:
-            try: context.scene.view_settings.view_transform = "Standard"
-            except Exception: pass
-
-        if self.import_skybox:
-            sky_geo = _import_skybox(self, filepath, self.blend_vertex_colors, "[PSO DC .rel]")
-            if sky_geo and self.extend_clip_distance:
-                extend_clip_distance(sky_geo)
-
-        self.report({'INFO'}, "Imported %d mesh(es), %d tex from %s" % (
-            mesh_count, len(textures), os.path.basename(filepath)))
-        return {'FINISHED'}
-
-
-# ============================================================
-# PSO GC .gj model operator
-# ============================================================
-class IMPORT_OT_pso_gj(Operator, ImportHelper):
-    bl_idname      = "import_scene.pso_gj"
-    bl_label       = "Import PSO GC .gj"
-    bl_description = "Import a Phantasy Star Online GameCube .gj model file"
-    bl_options     = {'REGISTER', 'UNDO'}
-
-    filename_ext = ".gj"
-    filter_glob: StringProperty(default="*.gj", options={'HIDDEN'})
-    xvm_filepath: StringProperty(name="Texture Archive (.gvm)",
-        description="Filename of the .gvm archive in the same folder (e.g. model.gvm). Leave blank to auto-detect",
-        default="")
-    blend_vertex_colors: BoolProperty(name="Blend Vertex Colors (Modulate 2X)", default=False,
-        description="Apply vertex colors as lighting in the scene")
-    disable_color_correction: BoolProperty(name="Disable Color Correction", default=True,
-        description="Set Color Management to Standard")
-    extend_clip_distance: BoolProperty(name="Extend Viewport Clip Distance", default=True,
-        description="Raise Clip End so the model is fully visible")
-
-    def draw(self, context):
-        l = self.layout
-        l.label(text="Texture Archive (.gvm):")
-        l.prop(self, "xvm_filepath", text="")
-        l.label(text="(leave blank to auto-detect)"); l.separator()
-        l.prop(self, "blend_vertex_colors"); l.prop(self, "disable_color_correction")
-        l.prop(self, "extend_clip_distance")
-
-    def execute(self, context):
-        filepath = self.filepath
-        try:
-            with open(filepath, 'rb') as f: gj_data = f.read()
-        except OSError as e:
-            self.report({'ERROR'}, "Cannot open: %s" % e); return {'CANCELLED'}
-
-        manual_name = self.xvm_filepath.strip()
-        gvm_path = (os.path.join(os.path.dirname(filepath), manual_name) if manual_name
-                    else find_compound_tex_path(filepath) or find_gvm_path(filepath))
-        textures = []
-        if gvm_path and os.path.exists(gvm_path):
-            try:
-                with open(gvm_path, 'rb') as f: raw = f.read()
-                textures = load_texture_archive(raw)
-                msg = "Loaded %d texture(s) from %s" % (len(textures), os.path.basename(gvm_path))
-                self.report({'INFO'}, msg); print("[PSO GC .gj] " + msg)
-            except Exception as e:
-                self.report({'WARNING'}, "Texture load failed: %s" % e)
-                print("[PSO GC .gj] Texture load failed: %s" % e)
-        else:
-            tried = gvm_path or "(no .gj.gvm / .gvm found)"
-            self.report({'WARNING'}, "GVM not found — tried: %s" % tried)
-            print("[PSO GC .gj] GVM not found — tried: %s" % tried)
-
-        geo = FlipperGCImporter(); geo.setTextures(textures)
-        try: geo.parse(gj_data)
-        except Exception as e:
-            self.report({'ERROR'}, "Parse error: %s" % e); return {'CANCELLED'}
-
-        try: mesh_count = build_blender_scene(geo, filepath, self.blend_vertex_colors)
-        except Exception as e:
-            self.report({'ERROR'}, "Scene build error: %s" % e); return {'CANCELLED'}
-
-        if self.extend_clip_distance: extend_clip_distance(geo)
-        if self.blend_vertex_colors: disable_eevee_shadows()
-        if self.disable_color_correction:
-            try: context.scene.view_settings.view_transform = "Standard"
-            except Exception: pass
-
-        self.report({'INFO'}, "Imported %d mesh(es), %d tex from %s" % (
-            mesh_count, len(textures), os.path.basename(filepath)))
-        return {'FINISHED'}
-
-
-# ============================================================
-# PSO GC n.rel stage operator
-# ============================================================
-class IMPORT_OT_pso_gc_rel(Operator, ImportHelper):
-    bl_idname      = "import_scene.pso_gc_rel"
-    bl_label       = "Import PSO GC Stage (.rel)"
-    bl_description = "Import a Phantasy Star Online GameCube n.rel stage file"
+class IMPORT_OT_pso_stage(Operator, ImportHelper):
+    bl_idname      = "import_scene.pso_stage"
+    bl_label       = "PSO Stage Model"
+    bl_description = "Import a Phantasy Star Online stage map file (n.rel)"
     bl_options     = {'REGISTER', 'UNDO'}
 
     filename_ext = ".rel"
     filter_glob: StringProperty(default="*n.rel", options={'HIDDEN'})
-    xvm_filepath: StringProperty(name="Texture Archive (.gvm)",
-        description="Path to .gvm archive (leave blank to auto-detect)",
-        default="", subtype='FILE_PATH')
-    blend_vertex_colors: BoolProperty(name="Blend Vertex Colors (Modulate 2X)", default=True,
-        description="Apply vertex colors as lighting in the scene")
-    disable_color_correction: BoolProperty(name="Disable Color Correction", default=True,
-        description="Set Color Management to Standard")
-    extend_clip_distance: BoolProperty(name="Extend Viewport Clip Distance", default=True,
-        description="Raise Clip End so the stage is fully visible")
-    import_skybox: BoolProperty(name="Attempt Sky Import", default=True,
-        description="Automatically look for a matching skybox file (s.xj / s.nj / s.gj) in the same folder")
+
+    platform: EnumProperty(
+        name="Platform",
+        description="Which version of PSO the file comes from",
+        items=_PLATFORM_ITEMS,
+        default='BB',
+    )
+    xvm_filepath: StringProperty(
+        name="Texture Archive",
+        description="Texture archive in the same folder (.xvm / .pvm / .gvm). Leave blank to auto-detect",
+        default="",
+    )
+    blend_vertex_colors: BoolProperty(
+        name="Blend Vertex Colors",
+        description="Apply vertex colors as lighting in the scene",
+        default=True,
+    )
+    disable_color_correction: BoolProperty(
+        name="Disable Color Correction",
+        description="Set Color Management to Standard so textures match the original game's appearance",
+        default=True,
+    )
+    extend_clip_distance: BoolProperty(
+        name="Extend Viewport Clip Distance",
+        description="Raise Clip End so the imported stage is fully visible",
+        default=True,
+    )
+    import_skybox: BoolProperty(
+        name="Attempt Sky Import",
+        description="Automatically look for a matching skybox file (s.xj / s.nj / s.gj) in the same folder",
+        default=True,
+    )
 
     def draw(self, context):
         l = self.layout
-        l.label(text="Texture Archive (.gvm):")
+        l.prop(self, "platform")
+        l.separator()
+        ext = {'BB': '.xvm', 'DC': '.pvm', 'GC': '.gvm'}.get(self.platform, '')
+        l.label(text="Texture Archive (%s):" % ext)
         l.prop(self, "xvm_filepath", text="")
-        l.label(text="(leave blank to auto-detect)"); l.separator()
-        l.prop(self, "blend_vertex_colors"); l.prop(self, "disable_color_correction")
-        l.prop(self, "extend_clip_distance"); l.prop(self, "import_skybox")
+        l.label(text="(leave blank to auto-detect)")
+        l.separator()
+        l.prop(self, "blend_vertex_colors")
+        l.prop(self, "disable_color_correction")
+        l.prop(self, "extend_clip_distance")
+        l.prop(self, "import_skybox")
 
     def execute(self, context):
         filepath = self.filepath
-        try:
-            with open(filepath, 'rb') as f: rel_data = f.read()
-        except OSError as e:
-            self.report({'ERROR'}, "Cannot open: %s" % e); return {'CANCELLED'}
+        platform = self.platform
+        label = "PSO %s Stage" % platform
 
-        gvm_path = self.xvm_filepath.strip() or find_gvm_path(filepath)
+        # ── Resolve texture archive ──────────────────────────────────────────
+        manual_name = self.xvm_filepath.strip()
+        # ── Resolve and load texture archive (shared for all platforms) ────────
         textures = []
-        if gvm_path and os.path.exists(gvm_path):
+        tex_path = (os.path.join(os.path.dirname(filepath), manual_name) if manual_name
+                    else find_compound_tex_path(filepath) or find_tex_archive(filepath, platform))
+        if tex_path and os.path.exists(tex_path):
             try:
-                with open(gvm_path, 'rb') as f: raw = f.read()
-                textures = gvm_load(raw)
-                msg = "Loaded %d texture(s) from %s" % (len(textures), os.path.basename(gvm_path))
-                self.report({'INFO'}, msg); print("[PSO GC .rel] " + msg)
+                with open(tex_path, 'rb') as f:
+                    raw = f.read()
+                textures = load_texture_archive(raw)
+                msg = "Loaded %d texture(s) from %s" % (len(textures), os.path.basename(tex_path))
+                self.report({'INFO'}, msg)
+                print("[%s] %s" % (label, msg))
             except Exception as e:
                 self.report({'WARNING'}, "Texture load failed: %s" % e)
-                print("[PSO GC .rel] Texture load failed: %s" % e)
         else:
-            tried = gvm_path or "(no .gvm found)"
-            self.report({'WARNING'}, "GVM not found — tried: %s" % tried)
-            print("[PSO GC .rel] GVM not found — tried: %s" % tried)
+            tried = tex_path or "(no texture archive found)"
+            self.report({'WARNING'}, "Texture archive not found — tried: %s" % tried)
+            print("[%s] Texture archive not found — tried: %s" % (label, tried))
 
-        geo = FlipperGCImporter(); geo.setTextures(textures)
-        try: geo.parse_stage(rel_data)
+        # ── Parse geometry (platform-specific) ──────────────────────────────
+        if platform == 'BB':
+            try:
+                with open(filepath, 'rb') as f:
+                    rel_data = f.read()
+            except OSError as e:
+                self.report({'ERROR'}, "Cannot open: %s" % e)
+                return {'CANCELLED'}
+
+            geo = NinjaStageGeometry()
+            geo.setTextures(textures)
+            try:
+                geo.parse(rel_data)
+            except Exception as e:
+                self.report({'ERROR'}, "Parse error: %s" % e)
+                return {'CANCELLED'}
+
+        elif platform == 'DC':
+            # Auto-locate the paired d.rel / n.rel
+            stem = os.path.splitext(filepath)[0]
+            if stem and stem[-1] in ('n', 'd'):
+                base   = stem[:-1]
+                d_path = base + "d.rel"
+                n_path = base + "n.rel"
+            else:
+                d_path = n_path = filepath
+
+            def _load(p):
+                if os.path.exists(p):
+                    with open(p, 'rb') as f:
+                        return f.read()
+                return None
+
+            d_data = _load(d_path)
+            n_data = _load(n_path)
+            if d_data is None and n_data is None:
+                self.report({'ERROR'}, "Cannot find d.rel or n.rel")
+                return {'CANCELLED'}
+
+            geo = NinjaDCRelImporter()
+            geo.setTextures(textures)
+            try:
+                geo.parse(d_data, n_data)
+            except Exception as e:
+                self.report({'ERROR'}, "Parse error: %s" % e)
+                return {'CANCELLED'}
+
+        else:  # GC
+            try:
+                with open(filepath, 'rb') as f:
+                    rel_data = f.read()
+            except OSError as e:
+                self.report({'ERROR'}, "Cannot open: %s" % e)
+                return {'CANCELLED'}
+
+            geo = FlipperGCImporter()
+            geo.setTextures(textures)
+            try:
+                geo.parse_stage(rel_data)
+            except Exception as e:
+                self.report({'ERROR'}, "Parse error: %s" % e)
+                return {'CANCELLED'}
+
+        # ── Build scene (shared for all platforms) ───────────────────────────
+        try:
+            mesh_count = build_blender_scene(geo, filepath, self.blend_vertex_colors)
         except Exception as e:
-            self.report({'ERROR'}, "Parse error: %s" % e); return {'CANCELLED'}
+            self.report({'ERROR'}, "Scene build error: %s" % e)
+            return {'CANCELLED'}
 
-        try: mesh_count = build_blender_scene(geo, filepath, self.blend_vertex_colors)
-        except Exception as e:
-            self.report({'ERROR'}, "Scene build error: %s" % e); return {'CANCELLED'}
-
-        if self.extend_clip_distance: extend_clip_distance(geo)
-        if self.blend_vertex_colors: disable_eevee_shadows()
+        if self.extend_clip_distance:
+            extend_clip_distance(geo)
+        if self.blend_vertex_colors:
+            disable_eevee_shadows()
         if self.disable_color_correction:
-            try: context.scene.view_settings.view_transform = "Standard"
-            except Exception: pass
+            try:
+                context.scene.view_settings.view_transform = "Standard"
+            except Exception:
+                pass
 
         if self.import_skybox:
-            sky_geo = _import_skybox(self, filepath, self.blend_vertex_colors, "[PSO GC .rel]")
+            sky_geo = _import_skybox(self, filepath, self.blend_vertex_colors, "[%s]" % label)
             if sky_geo and self.extend_clip_distance:
                 extend_clip_distance(sky_geo)
 
-        self.report({'INFO'}, "Imported %d mesh(es), %d tex from %s" % (
+        self.report({'INFO'}, "Imported %d mesh(es), %d texture(s) from %s" % (
             mesh_count, len(textures), os.path.basename(filepath)))
         return {'FINISHED'}
 
-
-# ============================================================
-# PSO BML archive operator
-# ============================================================
 class IMPORT_OT_pso_bml(Operator, ImportHelper):
     bl_idname      = "import_scene.pso_bml"
     bl_label       = "Import PSO BML Archive"
@@ -3799,9 +3475,10 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
                         os.path.basename(candidate), e))
                 break   # stop after the first match
 
-        total_meshes = 0
-        total_tex    = 0
-        combined_geo = None   # used for clip-distance calculation
+        total_meshes     = 0
+        total_tex        = 0
+        combined_geo     = None   # used for clip-distance calculation
+        last_bml_textures = []    # textures from the most recent model that had them
 
         for model_entry, tex_entry in pairs:
             name = model_entry['filename']
@@ -3840,6 +3517,15 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             # 3. BML-level sidecar (e.g. biri_ball.GVM shared across all models)
             if not textures and sidecar_textures:
                 textures = sidecar_textures
+
+            # 4. Reuse textures from the previous model in this BML.
+            #    LOD/variant models (lo_*, hi_*, sd_*) carry no embedded texture
+            #    of their own and are expected to share the set from their sibling,
+            #    which always appears directly before them in the archive.
+            if not textures and last_bml_textures:
+                textures = last_bml_textures
+                print("[PSO BML] %s: no texture found — reusing %d texture(s) from previous model" % (
+                    name, len(textures)))
 
             # Pick the right importer for the model format.
             if ext == '.nj':
@@ -3881,6 +3567,8 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             total_meshes += mc
             total_tex    += len(textures)
             combined_geo  = geo   # keep last for clip-distance (all share world space)
+            if textures:
+                last_bml_textures = textures
 
         if combined_geo and self.extend_clip_distance:
             extend_clip_distance(combined_geo)
@@ -3903,24 +3591,16 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
 # Menu hooks
 # ============================================================
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_pso_rel.bl_idname,    text="PSO BB Ninja Stage (.rel)")
-    self.layout.operator(IMPORT_OT_pso_xj.bl_idname,     text="PSO BB Ninja Model (.xj)")
-    self.layout.operator(IMPORT_OT_pso_nj.bl_idname,     text="PSO DC Ninja Model (.nj)")
-    self.layout.operator(IMPORT_OT_pso_dc_rel.bl_idname, text="PSO DC Ninja Stage (.rel)")
-    self.layout.operator(IMPORT_OT_pso_gj.bl_idname,     text="PSO GC Flipper Model (.gj)")
-    self.layout.operator(IMPORT_OT_pso_gc_rel.bl_idname, text="PSO GC Flipper Stage (.rel)")
-    self.layout.operator(IMPORT_OT_pso_bml.bl_idname,    text="PSO BML Archive (.bml)")
+    self.layout.operator(IMPORT_OT_pso_actor.bl_idname, text="PSO Actor Model (.xj/.nj/.gj)")
+    self.layout.operator(IMPORT_OT_pso_stage.bl_idname, text="PSO Stage Model (n.rel)")
+    self.layout.operator(IMPORT_OT_pso_bml.bl_idname,   text="PSO BML Archive (.bml)")
 
 # ============================================================
 # Registration
 # ============================================================
 _CLASSES = (
-    IMPORT_OT_pso_rel,
-    IMPORT_OT_pso_xj,
-    IMPORT_OT_pso_nj,
-    IMPORT_OT_pso_dc_rel,
-    IMPORT_OT_pso_gj,
-    IMPORT_OT_pso_gc_rel,
+    IMPORT_OT_pso_actor,
+    IMPORT_OT_pso_stage,
     IMPORT_OT_pso_bml,
 )
 
