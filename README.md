@@ -1,5 +1,5 @@
 # PSO Ultimate Importer
-<img width="930" height="556" alt="promo" src="https://github.com/user-attachments/assets/4fbb585a-949a-44f1-a02d-1d08fe3fc384" />
+<p align="center"><img width="930" height="556" alt="promo" src="https://github.com/user-attachments/assets/4fbb585a-949a-44f1-a02d-1d08fe3fc384" /></p>
 
 Addon for Blender 4.2+ / 5.x that imports 3D model formats used by Phantasy Star Online and its various versions.
 
@@ -14,7 +14,7 @@ Currently, the addon supports the following formats:
 |---------------|-------------|------------------|---------------|----------|
 | Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |   `.gsl`      |
 | GameCube      | `.gj`       | `n.rel`           | `.gvm`        |   `.gsl`      |
-| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |`.bml`,`.gsl`  
+| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |`.bml`, `.gsl`  
 
 Import settings allow you to customize some quality-of-life features.
 - **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
@@ -23,10 +23,12 @@ Import settings allow you to customize some quality-of-life features.
 - **Attempt Sky Import** - tries to automatically import a matching skybox file (if found) from the same folder as the n.rel stage file being imported
 
 You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "PSO" tab. This will allow you to extract all of a GSL file's contents to a specified folder, without directly importing them into your Blender scene.
-<img width="367" height="221" alt="image" src="https://github.com/user-attachments/assets/b60c0a59-4b96-4294-9764-6c2056cf7134" />
+<p align="center">
+<img width="367" height="221" alt="image" src="https://github.com/user-attachments/assets/19863cc1-f7de-4256-9b89-c7e1ad228227" />
+</p>
 
 
-Currently *not* supported:
+Currently, this addon does *not* support:
 - Animations / skeletons
 
 ## Installation
