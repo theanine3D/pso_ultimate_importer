@@ -405,10 +405,11 @@ def decode_pvrt(raw, color_fmt, data_fmt, width, height):
 
     px   = bytearray(width * height * 4)
     pos  = 0
-    compressed = data_fmt in VQ
 
-    if data_fmt in HAS_MIPS:
-        pos += _pvr_mipmap_skip(width, height, compressed)
+    # For non-VQ mip formats the data is stored smallest-mip-first; skip past
+    # the smaller levels to reach the full-size pixel data.
+    if data_fmt in HAS_MIPS and data_fmt not in VQ:
+        pos += _pvr_mipmap_skip(width, height, False)
 
     if data_fmt in VQ:
         cb_size = 256
@@ -424,6 +425,11 @@ def decode_pvrt(raw, color_fmt, data_fmt, width, height):
                 v, = struct.unpack_from('<H', raw, pos); pos += 2
                 entry.append(_pvr_color(color_fmt, v))
             codebook.append(entry)
+        # For VQ+Mip the codebook comes first, then small mip index arrays, then
+        # the full-size index.  Skip the small mip indices now that the codebook
+        # has been read.
+        if data_fmt in HAS_MIPS:
+            pos += _pvr_mipmap_skip(width, height, True)
         idx_start = pos
         for y in range(height // 2):
             for x in range(width // 2):
