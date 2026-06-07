@@ -3035,27 +3035,37 @@ def find_skybox_files(rel_filepath):
     by trying '.xvm', '.pvm', '.gvm' (again in order).
     Returns (None, None) if no skybox model is found.
     """
-    if not rel_filepath.lower().endswith('n.rel'):
+    name = os.path.basename(rel_filepath)
+    if not name.lower().endswith('n.rel'):
         return None, None
-    base = rel_filepath[:-5]   # strip "n.rel"
+    # base stem without the trailing letter+ext (e.g. "MAP_FOREST01")
+    base_stem = name[:-5]   # strip "n.rel" / "N.REL" (5 chars regardless of case)
+    folder    = os.path.dirname(rel_filepath)
 
+    try:
+        dir_files = os.listdir(folder)
+    except OSError:
+        return None, None
+
+    # Case-insensitive scan for the skybox model (base + 's' + model ext)
     sky_model_path = None
-    for model_suffix in ('s.xj', 's.nj', 's.gj'):
-        candidate = base + model_suffix
-        if os.path.exists(candidate):
-            sky_model_path = candidate
+    for entry in dir_files:
+        entry_stem, entry_ext = os.path.splitext(entry)
+        if (entry_stem.lower() == (base_stem + 's').lower()
+                and entry_ext.lower() in ('.xj', '.nj', '.gj')):
+            sky_model_path = os.path.join(folder, entry)
             break
 
     if sky_model_path is None:
         return None, None
 
-    # Companion texture archive: same base + 's', try each tex extension
+    # Case-insensitive scan for the companion texture archive
     sky_tex_path = None
-    sky_base = base + 's'
-    for tex_ext in ('.xvm', '.pvm', '.gvm'):
-        candidate = sky_base + tex_ext
-        if os.path.exists(candidate):
-            sky_tex_path = candidate
+    for entry in dir_files:
+        entry_stem, entry_ext = os.path.splitext(entry)
+        if (entry_stem.lower() == (base_stem + 's').lower()
+                and entry_ext.lower() in ('.xvm', '.pvm', '.gvm')):
+            sky_tex_path = os.path.join(folder, entry)
             break
 
     return sky_model_path, sky_tex_path
@@ -3447,11 +3457,12 @@ class IMPORT_OT_pso_stage(Operator, ImportHelper):
 
         elif platform == 'DC':
             # Auto-locate the paired d.rel / n.rel
-            stem = os.path.splitext(filepath)[0]
-            if stem and stem[-1] in ('n', 'd'):
+            stem, ext = os.path.splitext(filepath)
+            if stem and stem[-1].lower() in ('n', 'd'):
                 base   = stem[:-1]
-                d_path = base + "d.rel"
-                n_path = base + "n.rel"
+                # Preserve the original extension case (e.g. .REL not .rel)
+                d_path = base + ('D' if stem[-1].isupper() else 'd') + ext
+                n_path = base + ('N' if stem[-1].isupper() else 'n') + ext
             else:
                 d_path = n_path = filepath
 
