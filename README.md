@@ -12,7 +12,7 @@ Currently, the addon supports the following formats:
 
 | Platform      | Actors | Stages | Textures | Archives |
 |---------------|-------------|------------------|---------------|----------|
-| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |   `.gsl`      |
+| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |   `.gsl`, `.bml`        |
 | GameCube      | `.gj`       | `n.rel`           | `.gvm`        |   `.gsl`, `.bml`        |
 | Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |   `.gsl`, `.bml`        |
 
