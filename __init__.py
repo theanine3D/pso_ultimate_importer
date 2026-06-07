@@ -1,7 +1,7 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
@@ -2990,7 +2990,7 @@ def find_tex_archive(filepath, platform='BB'):
 
     # Build ordered list of name stems to try, most-specific first.
     stems = []
-    if stem and stem[-1] in ('n', 'd', 'c', 'r'):
+    if stem and stem[-1].lower() in ('n', 'd', 'c', 'r'):
         base = stem[:-1]
         stems.append(base)
         # BB stage convention: strip underscore+digit suffix of length 1–3
@@ -3159,10 +3159,57 @@ def _import_skybox(operator, rel_filepath, blend_vertex_colors, log_prefix):
 
 
 _PLATFORM_ITEMS = [
-    ('BB', "Blue Burst (PC)",  "Phantasy Star Online Blue Burst (.xj / n.rel / .xvm)"),
-    ('DC', "Dreamcast (DC)",   "Phantasy Star Online v2 (.nj / n.rel / .pvm)"),
-    ('GC', "GameCube (GC)",    "Phantasy Star Online Episode I, II, and III (.gj / n.rel / .gvm)"),
+    ('AUTO', "Autodetect",      "Automatically detect the platform from the file extension and contents"),
+    ('BB',   "Blue Burst (PC)", "Phantasy Star Online Blue Burst (.xj / n.rel / .xvm)"),
+    ('DC',   "Dreamcast (DC)",  "Phantasy Star Online v2 (.nj / n.rel / .pvm)"),
+    ('GC',   "GameCube (GC)",   "Phantasy Star Online Episode I, II, and III (.gj / n.rel / .gvm)"),
 ]
+
+
+def detect_platform(filepath):
+    """Infer the PSO platform from a model/stage filepath.
+
+    Strategy:
+      - Actor files (.xj/.nj/.gj): extension is unambiguous.
+      - Stage files (.rel): check for a DC sibling (paired d.rel/n.rel), then
+        scan the file for GC-specific magic bytes; default to BB.
+    Returns 'BB', 'DC', or 'GC'.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == '.xj':
+        return 'BB'
+    if ext == '.gj':
+        return 'GC'
+    if ext == '.nj':
+        return 'DC'
+
+    # .rel — check for DC's characteristic paired d.rel / n.rel sibling.
+    # Use a case-insensitive directory scan so filenames like MAP_LOBBY00N.REL
+    # are matched regardless of case.
+    name_stem = os.path.splitext(os.path.basename(filepath))[0]
+    if name_stem and name_stem[-1].lower() in ('n', 'd'):
+        base         = name_stem[:-1].lower()
+        other_letter = 'd' if name_stem[-1].lower() == 'n' else 'n'
+        folder       = os.path.dirname(filepath)
+        try:
+            for entry in os.listdir(folder):
+                entry_stem, entry_ext = os.path.splitext(entry)
+                if (entry_ext.lower() == '.rel'
+                        and entry_stem.lower() == base + other_letter):
+                    return 'DC'
+        except OSError:
+            pass
+
+    # Scan for GC geometry/texture-list magic bytes
+    try:
+        with open(filepath, 'rb') as f:
+            data = f.read()
+        if b'GJCM' in data or b'GJTL' in data:
+            return 'GC'
+    except OSError:
+        pass
+
+    return 'BB'
 
 # ============================================================
 # PSO Actor Model operator  (.xj / .nj / .gj)
@@ -3180,7 +3227,7 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
         name="Platform",
         description="Which version of PSO the file comes from",
         items=_PLATFORM_ITEMS,
-        default='BB',
+        default='AUTO',
     )
     xvm_filepath: StringProperty(
         name="Texture Archive",
@@ -3207,8 +3254,11 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
         l = self.layout
         l.prop(self, "platform")
         l.separator()
-        ext = {'BB': '.xvm', 'DC': '.pvm', 'GC': '.gvm'}.get(self.platform, '')
-        l.label(text="Texture Archive (%s):" % ext)
+        if self.platform == 'AUTO':
+            ext_hint = '.xvm / .pvm / .gvm'
+        else:
+            ext_hint = {'BB': '.xvm', 'DC': '.pvm', 'GC': '.gvm'}.get(self.platform, '')
+        l.label(text="Texture Archive (%s):" % ext_hint)
         l.prop(self, "xvm_filepath", text="")
         l.label(text="(leave blank to auto-detect)")
         l.separator()
@@ -3226,6 +3276,9 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
             return {'CANCELLED'}
 
         platform = self.platform
+        if platform == 'AUTO':
+            platform = detect_platform(filepath)
+            self.report({'INFO'}, "Autodetected platform: %s" % platform)
         label = "PSO %s Actor" % platform
 
         # ── Resolve texture archive ──────────────────────────────────────────
@@ -3301,7 +3354,7 @@ class IMPORT_OT_pso_stage(Operator, ImportHelper):
         name="Platform",
         description="Which version of PSO the file comes from",
         items=_PLATFORM_ITEMS,
-        default='BB',
+        default='AUTO',
     )
     xvm_filepath: StringProperty(
         name="Texture Archive",
@@ -3333,8 +3386,11 @@ class IMPORT_OT_pso_stage(Operator, ImportHelper):
         l = self.layout
         l.prop(self, "platform")
         l.separator()
-        ext = {'BB': '.xvm', 'DC': '.pvm', 'GC': '.gvm'}.get(self.platform, '')
-        l.label(text="Texture Archive (%s):" % ext)
+        if self.platform == 'AUTO':
+            ext_hint = '.xvm / .pvm / .gvm'
+        else:
+            ext_hint = {'BB': '.xvm', 'DC': '.pvm', 'GC': '.gvm'}.get(self.platform, '')
+        l.label(text="Texture Archive (%s):" % ext_hint)
         l.prop(self, "xvm_filepath", text="")
         l.label(text="(leave blank to auto-detect)")
         l.separator()
@@ -3346,6 +3402,9 @@ class IMPORT_OT_pso_stage(Operator, ImportHelper):
     def execute(self, context):
         filepath = self.filepath
         platform = self.platform
+        if platform == 'AUTO':
+            platform = detect_platform(filepath)
+            self.report({'INFO'}, "Autodetected platform: %s" % platform)
         label = "PSO %s Stage" % platform
 
         # ── Resolve texture archive ──────────────────────────────────────────
