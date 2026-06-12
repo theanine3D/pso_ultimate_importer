@@ -29,8 +29,8 @@ You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "
 
 
 Currently, this addon does *not* support:
-- Animations / skeletons - planned
-- Exporting models - not planned
+- Animations / skeletons (planned)
+- Exporting models (not planned)
 
 ## Installation
 1. Click the green "Code" button above and press "Download ZIP"
