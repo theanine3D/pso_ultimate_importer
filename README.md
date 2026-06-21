@@ -50,7 +50,7 @@ You can find the importers via Blender's "_FIle_" -> "_Import_" menu.
 
 <img width="640" height="360" alt="anim test - sharks" src="https://github.com/user-attachments/assets/bed0071a-266b-4e18-a9dd-5a4b69f5c14b" />
 
-Animation support - animations (.njm) in the same folder/BML are automatically imported when importing a model
+Animation support for DCV2 / BB / GC actor models
 
 <img width="589" height="364" alt="promo2" src="https://github.com/user-attachments/assets/765c1ae4-75cd-43b5-815c-dd2554868452" />
 
