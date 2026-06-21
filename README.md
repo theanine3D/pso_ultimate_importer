@@ -44,6 +44,7 @@ You can find the importers via Blender's "_FIle_" -> "_Import_" menu.
 - Blue Burst stored many of its 3D assets in a large archive named "data.gsl", which is located in the root "data" directory. You can use the GSL extractor in this addon (see above) to extract all the files from data.gsl, and then you'll find many .bml for enemies, bosses, and NPCs  that you can import directly.
 - BML files often contain more than 1 model. When you import a BML, you'll often see multiple models/characters/enemies jumbled together in the middle of your Blender scene. To isolate the one you want, turn off all of the collections in the Outliner, and enable only one collection at a time, so you can see each one clearly. 
 - This addon will setup most materials for you automatically. However, any materials with blended transparency, emissive effects, or animations will still require manual setup. My other addon, [Material Batch Tools](https://extensions.blender.org/add-ons/matbatchtools/), helps make this a lot faster - in particular, the material templates feature, set to "Additive + Texture + Color" can fix any selected glowing/emissive meshes with just one click.
+- Animations can be found / assigned via the Dope Sheet's Action Editor. Select your armature first in the 3D viewport first, then select the action in the Action Editor. If animations don't play, you may need to assign the "Object" in the Slot setting (second dropdown menu at the top of the action editor), which was added in Blender 4.4.
 
 ## Previews
 
