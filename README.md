@@ -21,6 +21,7 @@ Import settings allow you to customize some quality-of-life features.
 - **Disable Color Correction** - adjusts the Color Management settings in your scene to sRGB / Standard, so colors match the original colors from PSO
 - **Extend Viewport Clip Distance** - increases the clipping distance in your scene just enough so that the model is immediately visible, no matter how large it might be
 - **Attempt Sky Import** - tries to automatically import a matching skybox file (if found) from the same folder as the n.rel stage file being imported
+- **Import Animations** - automatically imports any .njm animation files for your selected model - .njm must be in the same folder or in the same BML archive being imported
 
 You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "PSO" tab. This will allow you to extract all of a GSL file's contents to a specified folder, without directly importing them into your Blender scene.
 <p align="center">
