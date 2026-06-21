@@ -1,7 +1,7 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
-    "version": (1, 0, 2),
+    "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
@@ -1166,12 +1166,13 @@ class NinjaStageGeometry:
             })
 
         self.meshes_data.append({
-            'positions': pos_list,
-            'normals':   norm_list,
-            'colors':    color_list,
-            'uvs':       uv_list,
-            'triangles': tri_list,
-            'mat_index': mat_index,
+            'positions':  pos_list,
+            'normals':    norm_list,
+            'colors':     color_list,
+            'uvs':        uv_list,
+            'triangles':  tri_list,
+            'mat_index':  mat_index,
+            'bone_index': getattr(self, 'current_bone_index', -1),
         })
 
 # ============================================================
@@ -1361,6 +1362,7 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
 
     # --- Meshes -> Blender mesh objects ---
     name_counters = {}   # base_name -> next integer suffix
+    mesh_objects  = []   # list of (obj, bone_indices_list) for armature setup
 
     for i, md in enumerate(geo.meshes_data):
         verts = md['positions']
@@ -1419,6 +1421,84 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
         obj = bpy.data.objects.new(obj_name, bl_mesh)
         obj.rotation_euler = (math.radians(90), 0, 0)
         collection.objects.link(obj)
+        mesh_objects.append((obj, md.get('bone_indices', [])))
+
+    # --- Armature (only if the importer tracked a node hierarchy) ---
+    geo_nodes = getattr(geo, 'nodes', None)
+    if geo_nodes:
+        arm_data = bpy.data.armatures.new(col_name)
+        arm_obj  = bpy.data.objects.new(col_name + "_Armature", arm_data)
+        arm_obj.rotation_euler = (math.radians(90), 0, 0)
+        arm_obj.show_in_front  = True
+        collection.objects.link(arm_obj)
+
+        saved_active = bpy.context.view_layer.objects.active
+        bpy.context.view_layer.objects.active = arm_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        edit_bones = arm_data.edit_bones
+        bone_list  = []   # indexed by node DFS order
+        for ni, node_info in enumerate(geo_nodes):
+            eb   = edit_bones.new("bone_%03d" % ni)
+            wp   = node_info['world_pos']
+            eb.head = (wp[0], wp[1], wp[2])
+            axes = node_info.get('world_axes')
+            if axes:
+                # Point bone in NJ world-Y direction; align roll to NJ world-Z
+                y_ax = axes[1]; z_ax = axes[2]
+                bl = 0.05
+                eb.tail = (wp[0] + y_ax[0]*bl, wp[1] + y_ax[1]*bl, wp[2] + y_ax[2]*bl)
+                try:
+                    from mathutils import Vector
+                    eb.align_roll(Vector(z_ax))
+                except Exception:
+                    pass
+            else:
+                eb.tail = (wp[0], wp[1] + 0.05, wp[2])
+            pi = node_info['parent_index']
+            if 0 <= pi < len(bone_list):
+                eb.parent        = bone_list[pi]
+                eb.use_connect   = False
+            bone_list.append(eb)
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.context.view_layer.objects.active = saved_active
+
+        # NJ DashMat4.rotate(x,y,z) applies Rx*Ry*Rz in row-vector convention
+        # = extrinsic X→Y→Z = intrinsic ZYX.  Blender's 'ZYX' mode matches.
+        for pb in arm_obj.pose.bones:
+            pb.rotation_mode = 'ZYX'
+
+        # Populate rest-transform cache for NJM animation import
+        rt = {}
+        for ni, node_info in enumerate(geo_nodes):
+            rt[ni] = {
+                'pos': node_info.get('local_pos', (0.0, 0.0, 0.0)),
+                'rot': node_info.get('local_rot', (0.0, 0.0, 0.0)),
+            }
+        bone_count = len(geo_nodes)
+        _pso_rest_transforms[bone_count] = rt
+        # Strip directory, extension, and "_Armature" suffix to get a plain stem for name matching
+        import os as _os
+        _stem = _os.path.splitext(_os.path.basename(col_name))[0]
+        _pso_armatures.append((_stem, bone_count, arm_obj))
+
+        # Assign per-vertex bone groups, armature modifier, and parent each mesh to the armature
+        n_nodes = len(geo_nodes)
+        for obj, bone_indices in mesh_objects:
+            if bone_indices:
+                # Group vertex positions by which bone they belong to
+                bone_to_verts = {}
+                for vi, bi in enumerate(bone_indices):
+                    if 0 <= bi < n_nodes:
+                        bone_to_verts.setdefault(bi, []).append(vi)
+                for bi, vert_indices in bone_to_verts.items():
+                    vg = obj.vertex_groups.new(name="bone_%03d" % bi)
+                    vg.add(vert_indices, 1.0, 'REPLACE')
+            mod        = obj.modifiers.new(name="Armature", type='ARMATURE')
+            mod.object = arm_obj
+            obj.parent = arm_obj
+            obj.matrix_parent_inverse = arm_obj.matrix_world.inverted()
 
     return len(geo.meshes_data)
 
@@ -1430,13 +1510,15 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
 class NinjaXJImporter:
 
     def __init__(self):
-        self.texNames       = []   # filename strings from NJTL chunk
-        self.vertex_stack   = {}
-        self.materials_data = []
-        self.meshes_data    = []
-        self.textures       = []   # from .xvm
-        self.current_matrix = DashMat4()
-        self.material       = {}
+        self.texNames            = []   # filename strings from NJTL chunk
+        self.vertex_stack        = {}
+        self.materials_data      = []
+        self.meshes_data         = []
+        self.textures            = []   # from .xvm
+        self.current_matrix      = DashMat4()
+        self.material            = {}
+        self.nodes               = []   # node hierarchy for armature: {parent_index, world_pos, flags}
+        self.current_bone_index  = -1   # set before each readMesh() call
 
     def setTextures(self, textures):
         self.textures = textures
@@ -1499,7 +1581,7 @@ class NinjaXJImporter:
             self.texNames.append(self.bs.readString())
 
     # ------------------------------------------------------------------
-    def readBone(self, pMatrix=None):
+    def readBone(self, pMatrix=None, parent_idx=-1):
         if self.bs.pos + 52 > self.bs.getSize():
             return
         c    = 2.0 * math.pi / 0x10000
@@ -1523,6 +1605,21 @@ class NinjaXJImporter:
 
         self.current_matrix = mat
 
+        # Record this node in DFS order for armature building
+        my_idx = len(self.nodes)
+        m = mat.mtx
+        self.nodes.append({
+            'parent_index': parent_idx,
+            'world_pos':    (m[3][0], m[3][1], m[3][2]),
+            'world_axes':   ((m[0][0], m[0][1], m[0][2]),
+                             (m[1][0], m[1][1], m[1][2]),
+                             (m[2][0], m[2][1], m[2][2])),
+            'local_pos':    node['pos'] if not (node['flags'] & 0x01) else (0.0, 0.0, 0.0),
+            'local_rot':    node['rot'] if not (node['flags'] & 0x02) else (0.0, 0.0, 0.0),
+            'flags':        node['flags'],
+        })
+        self.current_bone_index = my_idx
+
         size = self.bs.getSize()
         if node['meshOfs'] >= size or node['childOfs'] >= size or node['siblingOfs'] >= size:
             return
@@ -1533,11 +1630,11 @@ class NinjaXJImporter:
 
         if node['childOfs'] != 0:
             self.bs.seek(node['childOfs'])
-            self.readBone(mat)
+            self.readBone(mat, my_idx)
 
         if node['siblingOfs'] != 0:
             self.bs.seek(node['siblingOfs'])
-            self.readBone(pMatrix)
+            self.readBone(pMatrix, parent_idx)
 
     # ------------------------------------------------------------------
     def readMesh(self):
@@ -1612,6 +1709,7 @@ class NinjaXJImporter:
                 v = self.bs.readFloat()
                 vertex['uv'] = (u, 1.0 - v)   # flip V for Blender
 
+            vertex['bone_index'] = self.current_bone_index
             self.vertex_stack[i] = vertex
 
     # ------------------------------------------------------------------
@@ -1696,12 +1794,15 @@ class NinjaXJImporter:
         uv_list    = []
         tri_list   = []
 
+        bone_index_list = []
+
         for point in triangles:
             if point not in self.vertex_stack:
                 continue
             vert = self.vertex_stack[point]
             tri_list.append(len(pos_list))
             pos_list.append(vert['pos'])
+            bone_index_list.append(vert.get('bone_index', -1))
             if vert['norm']  is not None: norm_list.append(vert['norm'])
             if vert['color'] is not None: color_list.append(vert['color'])
             if vert['uv']    is not None: uv_list.append(vert['uv'])
@@ -1735,12 +1836,13 @@ class NinjaXJImporter:
             })
 
         self.meshes_data.append({
-            'positions': pos_list,
-            'normals':   norm_list,
-            'colors':    color_list,
-            'uvs':       uv_list,
-            'triangles': tri_list,
-            'mat_index': mat_index,
+            'positions':    pos_list,
+            'normals':      norm_list,
+            'colors':       color_list,
+            'uvs':          uv_list,
+            'triangles':    tri_list,
+            'mat_index':    mat_index,
+            'bone_indices': bone_index_list,
         })
 
 
@@ -1916,6 +2018,8 @@ class NinjaChunkMixin:
                 r2 = bs.readUByte()/255.0; a2 = bs.readUByte()/255.0
                 v['color'] = (r2, g2, b2, a2)
 
+            v['bone_index'] = getattr(self, 'current_bone_index', -1)
+
             if ch == NJD_CV_VN_NF:
                 # NJD_CV_VN_NF has a 4-byte field: [nofs (int16), padding (int16)].
                 # In GC big-endian NJ, the 4-byte word swap (each uint32 is byte-reversed
@@ -2018,7 +2122,7 @@ class NinjaChunkMixin:
 
     def _appendPoints(self, triangles):
         if not triangles: return
-        pos_list=[]; norm_list=[]; color_list=[]; uv_list=[]; tri_list=[]
+        pos_list=[]; norm_list=[]; color_list=[]; uv_list=[]; tri_list=[]; bone_index_list=[]
         # Process complete triangles atomically: skip any triangle where a vertex
         # is absent from the stack (avoids a non-multiple-of-3 triangle list).
         for j in range(0, len(triangles) - 2, 3):
@@ -2029,6 +2133,7 @@ class NinjaChunkMixin:
                 vt = self.vertex_stack[pt['index']]
                 tri_list.append(len(pos_list))
                 pos_list.append(vt['pos'])
+                bone_index_list.append(vt.get('bone_index', -1))
                 if vt.get('norm'):  norm_list.append(vt['norm'])
                 if vt.get('color'): color_list.append(vt['color'])
                 if pt.get('uv'):    uv_list.append(pt['uv'])
@@ -2046,8 +2151,13 @@ class NinjaChunkMixin:
                 'doubleSided': False, 'has_vertex_colors': has_vc,
             })
         self.meshes_data.append({
-            'positions': pos_list, 'normals': norm_list, 'colors': color_list,
-            'uvs': uv_list, 'triangles': tri_list, 'mat_index': mi,
+            'positions':    pos_list,
+            'normals':      norm_list,
+            'colors':       color_list,
+            'uvs':          uv_list,
+            'triangles':    tri_list,
+            'mat_index':    mi,
+            'bone_indices': bone_index_list,
         })
 
 
@@ -2197,6 +2307,7 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
     # (min_inv = min_true_offset + B → B = min_inv - true_min).
     # At most 1024 iterations of O(N) constraint checks — very fast.
     best_B = None
+    best_B_validated = False
     for true_min in range(4, min(4097, payload_size), 4):
         B = min_inv - true_min
         if B < b_lo or B > b_hi:
@@ -2209,6 +2320,7 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
             continue
         if all(looks_like_bone(v - B) for v in sample_vals):
             best_B = B
+            best_B_validated = True
             break
 
     if best_B is None:
@@ -2226,6 +2338,11 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
 
     if best_B is None:
         print("[PSO POF0] No valid relocation base found in range [%d, %d]" % (b_lo, b_hi))
+        return njcm_payload
+
+    if not best_B_validated:
+        # Base found only via relaxed (no bone-structure) fallback — not
+        # trustworthy enough to patch; skip to avoid corrupting strip data.
         return njcm_payload
 
     print("[PSO POF0] Applying relocation base 0x%X to %d pointer(s) "
@@ -2251,15 +2368,17 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
 class NinjaDCImporter(NinjaChunkMixin):
 
     def __init__(self):
-        self.texNames       = []
-        self.vertex_stack   = {}
-        self.materials_data = []
-        self.meshes_data    = []
-        self.textures       = []
-        self.current_matrix = DashMat4()
-        self.material       = {}
-        self.store_ofs      = [None] * 256
-        self.jump_to        = 0
+        self.texNames            = []
+        self.vertex_stack        = {}
+        self.materials_data      = []
+        self.meshes_data         = []
+        self.textures            = []
+        self.current_matrix      = DashMat4()
+        self.material            = {}
+        self.store_ofs           = [None] * 256
+        self.jump_to             = 0
+        self.nodes               = []   # node hierarchy for armature
+        self.current_bone_index  = -1
 
     def setTextures(self, textures): self.textures = textures
 
@@ -2325,12 +2444,31 @@ class NinjaDCImporter(NinjaChunkMixin):
         for off, clen in chunk_map.get(MAGIC_NJCM, []):
             njcm_bytes = data[off : off + clen]
             if pof0_chunks:
-                njcm_end = off + clen
-                # Prefer the POF0 that follows the NJCM in the file
-                after = [(po, pc) for po, pc in pof0_chunks if po > njcm_end]
-                pof0_off, pof0_clen = after[0] if after else pof0_chunks[0]
-                pof0_bytes = data[pof0_off : pof0_off + pof0_clen]
-                njcm_bytes = apply_pof0_relocation(njcm_bytes, pof0_bytes, big_endian)
+                # Before-NJCM POF0 chunks carry NJTL texture-list pointers, not
+                # NJCM bone/mesh pointers — never apply them to the NJCM payload.
+                # Only use a POF0 that appears after the NJCM in the file, and
+                # only when the root bone's pointer fields are not already valid
+                # (i.e. the file has a non-zero serialization base, as with GC
+                # boss models like the gryphon).  DC/BB models whose NJCM pointers
+                # are already in-range are left untouched.
+                bo_str = '>' if big_endian else '<'
+                root_needs_reloc = True
+                if len(njcm_bytes) >= 52:
+                    fl = struct.unpack_from(bo_str + 'I', njcm_bytes, 0)[0]
+                    sz = len(njcm_bytes)
+                    root_needs_reloc = (
+                        fl > 0x3FFF or
+                        any(struct.unpack_from(bo_str + 'I', njcm_bytes, fo)[0] not in (0,) and
+                            struct.unpack_from(bo_str + 'I', njcm_bytes, fo)[0] >= sz
+                            for fo in (4, 44, 48))
+                    )
+                if root_needs_reloc:
+                    njcm_end = off + clen
+                    after = [(po, pc) for po, pc in pof0_chunks if po > njcm_end]
+                    if after:
+                        pof0_off, pof0_clen = after[0]
+                        pof0_bytes = data[pof0_off : pof0_off + pof0_clen]
+                        njcm_bytes = apply_pof0_relocation(njcm_bytes, pof0_bytes, big_endian)
             self.bs = BitStream(njcm_bytes, big_endian=big_endian)
             self._readBone()
             break   # only the first NJCM is geometry
@@ -2345,7 +2483,7 @@ class NinjaDCImporter(NinjaChunkMixin):
         for o in sofs:
             self.bs.seek(o); self.texNames.append(self.bs.readString())
 
-    def _readBone(self, pMatrix=None):
+    def _readBone(self, pMatrix=None, parent_idx=-1):
         # Non-quaternion node = 52 bytes; quaternion = 56. Bail early if we
         # don't have enough buffer left to read the smaller header.
         if self.bs.pos + 52 > self.bs.getSize():
@@ -2375,11 +2513,48 @@ class NinjaDCImporter(NinjaChunkMixin):
         if pMatrix is not None: mat.compose(pMatrix)
         self.current_matrix = mat
 
+        my_idx = len(self.nodes)
+        m = mat.mtx
+        # For quaternion-rotation bones, derive an euler approximation for rest_transforms
+        if flags & 0x400:
+            import math as _m
+            qx, qy, qz, qw = node['rot'][0], node['rot'][1], node['rot'][2], node['w']
+            _local_rot = (
+                _m.atan2(2*(qw*qx + qy*qz), 1 - 2*(qx*qx + qy*qy)),
+                _m.asin(max(-1.0, min(1.0, 2*(qw*qy - qz*qx)))),
+                _m.atan2(2*(qw*qz + qx*qy), 1 - 2*(qy*qy + qz*qz)),
+            )
+        else:
+            _local_rot = node['rot'] if not (flags & 0x02) else (0.0, 0.0, 0.0)
+        self.nodes.append({
+            'parent_index': parent_idx,
+            'world_pos':    (m[3][0], m[3][1], m[3][2]),
+            'world_axes':   ((m[0][0], m[0][1], m[0][2]),
+                             (m[1][0], m[1][1], m[1][2]),
+                             (m[2][0], m[2][1], m[2][2])),
+            'local_pos':    node['pos'] if not (flags & 0x01) else (0.0, 0.0, 0.0),
+            'local_rot':    _local_rot,
+            'flags':        flags,
+        })
+        self.current_bone_index = my_idx
+
         sz = self.bs.getSize()
-        if node['meshOfs'] >= sz or node['childOfs'] >= sz or node['siblingOfs'] >= sz: return
-        if node['meshOfs']    != 0: self.bs.seek(node['meshOfs']);    self._readMesh()
-        if node['childOfs']   != 0: self.bs.seek(node['childOfs']);   self._readBone(mat)
-        if node['siblingOfs'] != 0: self.bs.seek(node['siblingOfs']); self._readBone(pMatrix)
+        bail = node['meshOfs'] >= sz or node['childOfs'] >= sz or node['siblingOfs'] >= sz
+        # Combined out-of-bounds bail: if any pointer is invalid, skip this
+        # node's mesh and its entire subtree.  This matches the traversal
+        # behaviour of the reference importer and is required to suppress a
+        # specific early-DP mis-fire on certain character models (e.g. NiGHTS).
+        if bail:
+            return
+        if node['meshOfs'] != 0:
+            self.bs.seek(node['meshOfs'])
+            self._readMesh()
+        if node['childOfs'] != 0:
+            self.bs.seek(node['childOfs'])
+            self._readBone(mat, my_idx)
+        if node['siblingOfs'] != 0:
+            self.bs.seek(node['siblingOfs'])
+            self._readBone(pMatrix, parent_idx)
 
     def _readMesh(self):
         vofs = self.bs.readUInt(); cofs = self.bs.readUInt()
@@ -3265,6 +3440,11 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
         description="Raise Clip End so the imported model is fully visible",
         default=True,
     )
+    import_animations: BoolProperty(
+        name="Import Animations",
+        description="Search the model's directory for .njm animation files and import them as Blender Actions (only for .nj / .xj models)",
+        default=True,
+    )
 
     def draw(self, context):
         l = self.layout
@@ -3281,6 +3461,7 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
         l.prop(self, "blend_vertex_colors")
         l.prop(self, "disable_color_correction")
         l.prop(self, "extend_clip_distance")
+        l.prop(self, "import_animations")
 
     def execute(self, context):
         filepath = self.filepath
@@ -3349,8 +3530,34 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
             except Exception:
                 pass
 
-        self.report({'INFO'}, "Imported %d mesh(es), %d texture(s) from %s" % (
-            mesh_count, len(textures), os.path.basename(filepath)))
+        # Import animations (.njm) from the same directory, for .nj / .xj models only
+        total_actions = 0
+        model_ext = os.path.splitext(filepath)[1].lower()
+        if self.import_animations and platform != 'GC' and model_ext in ('.nj', '.xj'):
+            model_dir = os.path.dirname(filepath)
+            try:
+                dir_entries = os.listdir(model_dir)
+            except OSError:
+                dir_entries = []
+            for fname in sorted(dir_entries):
+                if os.path.splitext(fname)[1].lower() not in _ANIM_EXTS:
+                    continue
+                anim_path = os.path.join(model_dir, fname)
+                try:
+                    with open(anim_path, 'rb') as f:
+                        anim_data = f.read()
+                    njm = parse_njm(anim_data)
+                    if njm is None:
+                        self.report({'WARNING'}, "Could not parse animation: %s" % fname)
+                        continue
+                    action_name = os.path.splitext(fname)[0]
+                    build_blender_action(action_name, njm)
+                    total_actions += 1
+                except Exception as e:
+                    self.report({'WARNING'}, "Animation import error for %s: %s" % (fname, e))
+
+        self.report({'INFO'}, "Imported %d mesh(es), %d texture(s), %d action(s) from %s" % (
+            mesh_count, len(textures), total_actions, os.path.basename(filepath)))
         return {'FINISHED'}
 
 
@@ -3534,13 +3741,404 @@ class IMPORT_OT_pso_stage(Operator, ImportHelper):
             mesh_count, len(textures), os.path.basename(filepath)))
         return {'FINISHED'}
 
+# ============================================================
+# NJM animation — coordinate-space helpers
+# ============================================================
+
+# Module-level caches populated by build_blender_scene so that
+# build_blender_action can convert NJM absolute transforms to
+# Blender pose-bone deltas and auto-bind the action slot.
+# Both keyed by bone count (int).
+_pso_rest_transforms = {}  # {bone_count: {bone_idx: {'pos': tuple3, 'rot': tuple3}}}
+_pso_armatures       = []  # [(name_stem, bone_count, arm_obj), ...]
+
+
+def _longest_common_substring(a, b):
+    """Return the length of the longest common substring between a and b."""
+    a = a.lower(); b = b.lower()
+    best = 0
+    for i in range(len(a)):
+        for j in range(len(b)):
+            k = 0
+            while i + k < len(a) and j + k < len(b) and a[i + k] == b[j + k]:
+                k += 1
+            if k > best:
+                best = k
+    return best
+
+
+def _mat3_from_njm_euler(rx, ry, rz):
+    """3x3 column-vector rotation matrix for NJ intrinsic ZYX (= extrinsic XYZ)."""
+    import math as _m
+    cx, sx = _m.cos(rx), _m.sin(rx)
+    cy, sy = _m.cos(ry), _m.sin(ry)
+    cz, sz = _m.cos(rz), _m.sin(rz)
+    # Rz * Ry * Rx — matches DashMat4.rotate() application order
+    return [
+        [ cz*cy,              cz*sy*sx - sz*cx,  cz*sy*cx + sz*sx],
+        [ sz*cy,              sz*sy*sx + cz*cx,  sz*sy*cx - cz*sx],
+        [-sy,                 cy*sx,              cy*cx           ],
+    ]
+
+
+def _euler_from_mat3_njm(m):
+    """Extract NJ ZYX intrinsic euler (rx, ry, rz) from 3x3 column-vector matrix."""
+    import math as _m
+    sy = -m[2][0]
+    sy = max(-1.0, min(1.0, sy))
+    ry = _m.asin(sy)
+    cy = _m.cos(ry)
+    if abs(cy) > 1e-6:
+        rx = _m.atan2(m[2][1] / cy, m[2][2] / cy)
+        rz = _m.atan2(m[1][0] / cy, m[0][0] / cy)
+    else:
+        rx = 0.0
+        rz = _m.atan2(-m[0][1], m[1][1])
+    return (rx, ry, rz)
+
+
+def _mat3_mul(a, b):
+    """3x3 matrix multiply: result = a * b."""
+    return [
+        [a[0][0]*b[0][0] + a[0][1]*b[1][0] + a[0][2]*b[2][0],
+         a[0][0]*b[0][1] + a[0][1]*b[1][1] + a[0][2]*b[2][1],
+         a[0][0]*b[0][2] + a[0][1]*b[1][2] + a[0][2]*b[2][2]],
+        [a[1][0]*b[0][0] + a[1][1]*b[1][0] + a[1][2]*b[2][0],
+         a[1][0]*b[0][1] + a[1][1]*b[1][1] + a[1][2]*b[2][1],
+         a[1][0]*b[0][2] + a[1][1]*b[1][2] + a[1][2]*b[2][2]],
+        [a[2][0]*b[0][0] + a[2][1]*b[1][0] + a[2][2]*b[2][0],
+         a[2][0]*b[0][1] + a[2][1]*b[1][1] + a[2][2]*b[2][1],
+         a[2][0]*b[0][2] + a[2][1]*b[1][2] + a[2][2]*b[2][2]],
+    ]
+
+
+def _mat3_vec(m, v):
+    """Multiply 3x3 matrix m by 3D column vector v."""
+    return (
+        m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2],
+        m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2],
+        m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2],
+    )
+
+
+# ============================================================
+# NJM animation parser and Blender Action builder
+# ============================================================
+
+def parse_njm(data):
+    """Parse an NJM animation file (both NMDM/v2 and BB-footer variants).
+    Returns a dict with 'frame_count', 'interp', 'channels', 'tracks', or None on failure."""
+    import math
+    TWO_PI_OVER_65536 = 2.0 * math.pi / 65536.0
+
+    if len(data) < 4:
+        return None
+
+    bs = BitStream(data)
+    magic = bs.readUInt()
+
+    if magic == MAGIC_NMDM:
+        # v2 / DC / GC: NMDM magic, u32 chunk size, then motion header
+        _chunk_size = bs.readUInt()
+        motion_start = bs.tell()
+    else:
+        # BB player format: footer at end of file holds indirection offsets
+        if len(data) < 16:
+            return None
+        try:
+            bs.seek(len(data) - 16)
+            offset1 = bs.readUInt()
+            bs.seek(offset1)
+            action_offset = bs.readUInt()
+            bs.seek(action_offset + 4)
+            motion_start = bs.readUInt()
+        except Exception:
+            return None
+
+    if motion_start + 12 > len(data):
+        return None
+
+    # Motion header: i32 mDataTableOffset, i32 frameCount, u16 type, u16 inpFn
+    bs.seek(motion_start)
+    m_data_table_rel = bs.readInt()
+    frame_count      = bs.readInt()
+    motion_type      = bs.readUShort()
+    inp_fn           = bs.readUShort()
+
+    interp = inp_fn & 0xFF   # low byte: interpolation type (0=Linear, 1=Spline)
+    # NOTE: the node count is NOT stored in inp_fn.  It is implicit in the
+    # table size: the table ends where the first keyframe data begins, so we
+    # infer element_count below after scanning the table.
+
+    has_position   = bool(motion_type & 0x0001)
+    has_euler      = bool(motion_type & 0x0002)
+    has_scale      = bool(motion_type & 0x0004)
+    has_quaternion = bool(motion_type & 0x2000)
+
+    # Ordered channel list (determines table column order)
+    channels = []
+    if has_position:   channels.append('position')
+    if has_euler:      channels.append('euler')
+    if has_quaternion: channels.append('quaternion')
+    if has_scale:      channels.append('scale')
+
+    num_channels = len(channels)
+    if num_channels == 0:
+        return None
+
+    table_abs      = motion_start + m_data_table_rel
+    bytes_per_bone = num_channels * 8   # N i32 offsets + N i32 counts (SoA layout)
+
+    # Infer element_count: the table has no stored size; it ends where keyframe
+    # data begins.  We detect this by finding the minimum off value in all
+    # table entries (where cnt > 0), subject to the constraint that a valid
+    # keyframe offset at entry index i must point PAST the current entry:
+    #   off >= m_data_table_rel + (i+1) * bytes_per_bone
+    # This filters out small frame numbers from keyframe data that would
+    # otherwise be misread as table offsets when scanning past the table end.
+    min_kf_off = None
+    for i in range(512):
+        base = table_abs + i * bytes_per_bone
+        if base + bytes_per_bone > len(data):
+            break
+        min_valid = m_data_table_rel + (i + 1) * bytes_per_bone
+        for j in range(num_channels):
+            off = struct.unpack_from('<i', data, base + j * 4)[0]
+            cnt = struct.unpack_from('<i', data, base + num_channels * 4 + j * 4)[0]
+            if cnt > 0 and off >= min_valid:
+                if min_kf_off is None or off < min_kf_off:
+                    min_kf_off = off
+
+    if min_kf_off is None:
+        return None
+
+    element_count = (min_kf_off - m_data_table_rel) // bytes_per_bone
+    if element_count <= 0:
+        return None
+
+    tracks = []
+    for bone_idx in range(element_count):
+        bone_table_start = table_abs + bone_idx * bytes_per_bone
+        if bone_table_start + bytes_per_bone > len(data):
+            break
+
+        # Table layout: each channel has a (data_offset, keyframe_count) pair.
+        # All offsets come first, then all counts (struct-of-arrays layout).
+        bs.seek(bone_table_start)
+        ch_offsets = [bs.readInt() for _ in range(num_channels)]
+        ch_counts  = [bs.readInt() for _ in range(num_channels)]
+
+        bone_data = {k: [] for k in channels}
+        bone_data['bone_index'] = bone_idx
+
+        for ch_idx, ch_name in enumerate(channels):
+            off = ch_offsets[ch_idx]
+            cnt = ch_counts[ch_idx]
+            abs_off = motion_start + off
+
+            if cnt <= 0 or abs_off >= len(data):
+                continue
+
+            if ch_name == 'position':
+                for k in range(cnt):
+                    kf = abs_off + k * 16
+                    if kf + 16 > len(data): break
+                    bs.seek(kf)
+                    frame = bs.readInt()
+                    x = bs.readFloat(); y = bs.readFloat(); z = bs.readFloat()
+                    bone_data['position'].append((frame, x, y, z))
+
+            elif ch_name == 'euler':
+                # Detect compact (8-byte) vs wide (16-byte) encoding.
+                # Compact frames are u16 and must be monotonically increasing and < frameCount.
+                compact = True
+                if cnt > 0:
+                    bs.seek(abs_off)
+                    first_f = bs.readUShort()
+                    if first_f >= frame_count:
+                        compact = False
+                    else:
+                        prev = first_f
+                        for k in range(1, min(cnt, 8)):
+                            bs.seek(abs_off + k * 8)
+                            f = bs.readUShort()
+                            if f < prev:
+                                compact = False
+                                break
+                            prev = f
+
+                kf_size = 8 if compact else 16
+                for k in range(cnt):
+                    kf = abs_off + k * kf_size
+                    if kf + kf_size > len(data): break
+                    bs.seek(kf)
+                    if compact:
+                        frame = bs.readUShort()
+                        rx = bs.readUShort(); ry = bs.readUShort(); rz = bs.readUShort()
+                    else:
+                        frame = bs.readInt()
+                        rx = bs.readInt(); ry = bs.readInt(); rz = bs.readInt()
+                    bone_data['euler'].append((
+                        frame,
+                        rx * TWO_PI_OVER_65536,
+                        ry * TWO_PI_OVER_65536,
+                        rz * TWO_PI_OVER_65536,
+                    ))
+
+            elif ch_name == 'quaternion':
+                for k in range(cnt):
+                    kf = abs_off + k * 20
+                    if kf + 20 > len(data): break
+                    bs.seek(kf)
+                    frame = bs.readInt()
+                    w = bs.readFloat(); x = bs.readFloat()
+                    y = bs.readFloat(); z = bs.readFloat()
+                    bone_data['quaternion'].append((frame, w, x, y, z))
+
+            elif ch_name == 'scale':
+                for k in range(cnt):
+                    kf = abs_off + k * 16
+                    if kf + 16 > len(data): break
+                    bs.seek(kf)
+                    frame = bs.readInt()
+                    x = bs.readFloat(); y = bs.readFloat(); z = bs.readFloat()
+                    bone_data['scale'].append((frame, x, y, z))
+
+        tracks.append(bone_data)
+
+    return {
+        'frame_count':   frame_count,
+        'interp':        interp,
+        'channels':      channels,
+        'tracks':        tracks,
+        'element_count': element_count,
+    }
+
+
+def build_blender_action(action_name, njm):
+    """Create a bpy.data.actions Action from parsed NJM data. Returns the Action."""
+    action              = bpy.data.actions.new(name=action_name)
+    action.use_fake_user = True
+    interp_type = 'BEZIER' if njm['interp'] == 1 else 'LINEAR'
+
+    # Blender 4.4+ uses a layered action system; earlier versions expose action.fcurves directly.
+    # The group keyword also differs: legacy uses 'action_group', channelbag uses 'group_name'.
+    if hasattr(action, 'fcurves'):
+        fcurves   = action.fcurves
+        group_kw  = 'action_group'
+    else:
+        slot  = action.slots.new(id_type='OBJECT', name="Object")
+        layer = action.layers.new(name="Layer")
+        strip = layer.strips.new(type='KEYFRAME')
+        cb    = strip.channelbag(slot)
+        if cb is None:
+            if hasattr(strip, 'channelbag_create'):
+                cb = strip.channelbag_create(slot)
+            else:
+                cb = strip.channelbags.new(slot)
+        fcurves  = cb.fcurves
+        group_kw = 'group_name'
+
+    def new_fc(data_path, index, group):
+        return fcurves.new(data_path=data_path, index=index, **{group_kw: group})
+
+    # Find the best-matching armature by name similarity, with bone count as tiebreaker
+    element_count = njm.get('element_count', 0)
+    arm_obj = None
+    if _pso_armatures:
+        best_score = -1
+        for stem, bone_count, candidate in _pso_armatures:
+            lcs = _longest_common_substring(action_name, stem)
+            # Prefer longer name match; use bone-count match as a secondary boost
+            score = lcs * 2 + (1 if bone_count == element_count else 0)
+            if score > best_score:
+                best_score = score
+                arm_obj = candidate
+    rest_xforms = _pso_rest_transforms.get(element_count, {})
+
+    for bone_data in njm['tracks']:
+        bone_idx  = bone_data['bone_index']
+        bone_name = "bone_%03d" % bone_idx
+        prefix    = 'pose.bones["%s"]' % bone_name
+
+        rest      = rest_xforms.get(bone_idx, {})
+        rest_pos  = rest.get('pos', (0.0, 0.0, 0.0))
+        rest_rot  = rest.get('rot', (0.0, 0.0, 0.0))
+        R_rest    = _mat3_from_njm_euler(rest_rot[0], rest_rot[1], rest_rot[2])
+        # R_rest^T = R_rest^(-1) for rotation matrices
+        R_rest_T  = [[R_rest[j][i] for j in range(3)] for i in range(3)]
+
+        if bone_data.get('position'):
+            posed_pos = []
+            for (frame, x, y, z) in bone_data['position']:
+                delta = (x - rest_pos[0], y - rest_pos[1], z - rest_pos[2])
+                pp = _mat3_vec(R_rest_T, delta)
+                posed_pos.append((frame, pp[0], pp[1], pp[2]))
+            for axis_i in range(3):
+                fc = new_fc("%s.location" % prefix, axis_i, bone_name)
+                fc.keyframe_points.add(len(posed_pos))
+                for ki, (frame, px, py, pz) in enumerate(posed_pos):
+                    kp = fc.keyframe_points[ki]
+                    kp.co = (float(frame + 1), (px, py, pz)[axis_i])
+                    kp.interpolation = interp_type
+                fc.update()
+
+        if bone_data.get('euler'):
+            posed_euler = []
+            for (frame, rx, ry, rz) in bone_data['euler']:
+                R_njm  = _mat3_from_njm_euler(rx, ry, rz)
+                R_pose = _mat3_mul(R_rest_T, R_njm)
+                posed_euler.append((frame,) + _euler_from_mat3_njm(R_pose))
+            for axis_i in range(3):
+                fc = new_fc("%s.rotation_euler" % prefix, axis_i, bone_name)
+                fc.keyframe_points.add(len(posed_euler))
+                for ki, (frame, prx, pry, prz) in enumerate(posed_euler):
+                    kp = fc.keyframe_points[ki]
+                    kp.co = (float(frame + 1), (prx, pry, prz)[axis_i])
+                    kp.interpolation = interp_type
+                fc.update()
+
+        if bone_data.get('quaternion'):
+            for comp_i in range(4):
+                fc = new_fc("%s.rotation_quaternion" % prefix, comp_i, bone_name)
+                fc.keyframe_points.add(len(bone_data['quaternion']))
+                for ki, (frame, w, x, y, z) in enumerate(bone_data['quaternion']):
+                    kp = fc.keyframe_points[ki]
+                    kp.co = (float(frame + 1), (w, x, y, z)[comp_i])
+                    kp.interpolation = interp_type
+                fc.update()
+
+        if bone_data.get('scale'):
+            for axis_i in range(3):
+                fc = new_fc("%s.scale" % prefix, axis_i, bone_name)
+                fc.keyframe_points.add(len(bone_data['scale']))
+                for ki, (frame, x, y, z) in enumerate(bone_data['scale']):
+                    kp = fc.keyframe_points[ki]
+                    kp.co = (float(frame + 1), (x, y, z)[axis_i])
+                    kp.interpolation = interp_type
+                fc.update()
+
+    # Auto-assign the action (and slot, for Blender 5.1+) to the matching armature
+    if arm_obj is not None:
+        try:
+            anim_data = arm_obj.animation_data_create()
+            anim_data.action = action
+            # Blender 5.1+ layered actions require explicitly binding the slot
+            if hasattr(anim_data, 'action_slot') and action.slots:
+                anim_data.action_slot = action.slots[0]
+        except Exception:
+            pass
+
+    return action
+
+
 class IMPORT_OT_pso_bml(Operator, ImportHelper):
     bl_idname      = "import_scene.pso_bml"
     bl_label       = "Import PSO BML Archive"
     bl_description = (
         "Import a Phantasy Star Online BML model archive. "
-        "Extracts all models (.nj / .gj / .xj) and their paired textures; "
-        "animations (.njm) are ignored."
+        "Extracts all models (.nj / .gj / .xj), their paired textures, "
+        "and any animations (.njm) as Blender Actions."
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3562,12 +4160,18 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
         description="Raise Clip End so imported models are fully visible",
         default=True,
     )
+    import_animations: BoolProperty(
+        name="Import Animations",
+        description="Import .njm animations as Blender Actions and build an armature for the model",
+        default=True,
+    )
 
     def draw(self, context):
         l = self.layout
         l.prop(self, "blend_vertex_colors")
         l.prop(self, "disable_color_correction")
         l.prop(self, "extend_clip_distance")
+        l.prop(self, "import_animations")
 
     def execute(self, context):
         filepath = self.filepath
@@ -3598,7 +4202,8 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
         # Build a lookup: lower-case filename -> entry, for compound-ext search
         _entry_by_name = {e['filename'].lower(): e for e in entries}
 
-        pairs = []
+        pairs      = []
+        anim_entries = []   # .njm entries found in the archive
         i = 0
         while i < len(entries):
             name = entries[i]['filename']
@@ -3620,10 +4225,12 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
                             tex = _entry_by_name[compound]
                             break
                 pairs.append((model, tex))
-            # .njm / .gjm and anything else is silently skipped
+            elif ext in _ANIM_EXTS:
+                anim_entries.append(entries[i])
+            # anything else is silently skipped
             i += 1
 
-        if not pairs:
+        if not pairs and not anim_entries:
             self.report({'WARNING'}, "No importable models (.nj/.gj/.xj) found in BML")
             return {'CANCELLED'}
 
@@ -3731,6 +4338,8 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             if not geo.meshes_data:
                 continue
 
+            if not self.import_animations:
+                geo.nodes = []
             try:
                 mc = build_blender_scene(geo, name, self.blend_vertex_colors)
             except Exception as e:
@@ -3753,8 +4362,24 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             except Exception:
                 pass
 
-        msg = "Imported %d mesh(es), %d texture(s) from %s (%d model(s))" % (
-            total_meshes, total_tex, os.path.basename(filepath), len(pairs))
+        # Import animations (.njm) found in the BML archive
+        total_actions = 0
+        if self.import_animations:
+            for anim_entry in anim_entries:
+                anim_name = anim_entry['filename']
+                try:
+                    njm = parse_njm(anim_entry['data'])
+                    if njm is None:
+                        self.report({'WARNING'}, "Could not parse animation: %s" % anim_name)
+                        continue
+                    action_name = os.path.splitext(anim_name)[0]
+                    build_blender_action(action_name, njm)
+                    total_actions += 1
+                except Exception as e:
+                    self.report({'WARNING'}, "Animation import error for %s: %s" % (anim_name, e))
+
+        msg = "Imported %d mesh(es), %d texture(s), %d action(s) from %s (%d model(s))" % (
+            total_meshes, total_tex, total_actions, os.path.basename(filepath), len(pairs))
         self.report({'INFO'}, msg)
         print("[PSO BML] " + msg)
         return {'FINISHED'}
