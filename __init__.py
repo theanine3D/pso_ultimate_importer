@@ -1421,7 +1421,11 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
         obj = bpy.data.objects.new(obj_name, bl_mesh)
         obj.rotation_euler = (math.radians(90), 0, 0)
         collection.objects.link(obj)
-        mesh_objects.append((obj, md.get('bone_indices', [])))
+        # bone_indices: per-vertex list (DC/XJ), or expand a single bone_index for the whole mesh
+        _bverts = md.get('bone_indices', [])
+        if not _bverts and md.get('bone_index', -1) >= 0:
+            _bverts = [md['bone_index']] * len(verts)
+        mesh_objects.append((obj, _bverts))
 
     # --- Armature (only if the importer tracked a node hierarchy) ---
     geo_nodes = getattr(geo, 'nodes', None)
@@ -2685,16 +2689,18 @@ class NinjaDCRelImporter(NinjaChunkMixin):
 class FlipperGCImporter:
 
     def __init__(self):
-        self.texNames       = []
-        self.vertex_stack   = {}
-        self.materials_data = []
-        self.meshes_data    = []
-        self.textures       = []
-        self.current_matrix = DashMat4()
-        self.material       = {}
-        self.file_ofs       = 0       # abs offset of GJCM chunk start in main bs
-        self._stop          = False
-        self._face_flags    = 0
+        self.texNames            = []
+        self.vertex_stack        = {}
+        self.materials_data      = []
+        self.meshes_data         = []
+        self.textures            = []
+        self.current_matrix      = DashMat4()
+        self.material            = {}
+        self.file_ofs            = 0       # abs offset of GJCM chunk start in main bs
+        self._stop               = False
+        self._face_flags         = 0
+        self.nodes               = []      # node hierarchy for armature
+        self.current_bone_index  = -1
 
     def setTextures(self, textures): self.textures = textures
 
@@ -2730,18 +2736,35 @@ class FlipperGCImporter:
     def _readNode(self, pNode=None):
         if self._stop: return
         c = 2.0 * math.pi / 0x10000
-        node = {'flags':      self.bs.readUInt(), 'meshOfs': self.bs.readUInt(),
+        flags = self.bs.readUInt()
+        node = {'flags':      flags, 'meshOfs': self.bs.readUInt(),
                 'pos':        [self.bs.readFloat(), self.bs.readFloat(), self.bs.readFloat()],
                 'rot':        [self.bs.readInt()*c, self.bs.readInt()*c, self.bs.readInt()*c],
                 'scl':        [self.bs.readFloat(), self.bs.readFloat(), self.bs.readFloat()],
                 'childOfs':   self.bs.readUInt(), 'siblingOfs': self.bs.readUInt()}
         mat = DashMat4()
-        if not (node['flags'] & 0x02): mat.rotate(node['rot'])
-        if not (node['flags'] & 0x01): mat.translate(node['pos'])
+        if not (flags & 0x02): mat.rotate(node['rot'])
+        if not (flags & 0x01): mat.translate(node['pos'])
         pmat = pNode['matrix'] if pNode else None
         if pmat is not None: mat.compose(pmat)
         self.current_matrix = mat
-        bone = {'matrix': mat}
+
+        # Record node in DFS order for armature building
+        my_idx     = len(self.nodes)
+        parent_idx = pNode['idx'] if pNode else -1
+        m = mat.mtx
+        self.nodes.append({
+            'parent_index': parent_idx,
+            'world_pos':    (m[3][0], m[3][1], m[3][2]),
+            'world_axes':   ((m[0][0], m[0][1], m[0][2]),
+                             (m[1][0], m[1][1], m[1][2]),
+                             (m[2][0], m[2][1], m[2][2])),
+            'local_pos':    tuple(node['pos']) if not (flags & 0x01) else (0.0, 0.0, 0.0),
+            'local_rot':    tuple(node['rot']) if not (flags & 0x02) else (0.0, 0.0, 0.0),
+            'flags':        flags,
+        })
+        self.current_bone_index = my_idx
+        bone = {'matrix': mat, 'idx': my_idx}
 
         sz = self.bs.getSize()
         if node['meshOfs']    != 0 and node['meshOfs']    <= sz:
@@ -2884,8 +2907,9 @@ class FlipperGCImporter:
                 'doubleSided': False, 'has_vertex_colors': has_vc,
             })
         self.meshes_data.append({
-            'positions': attrs['pos'], 'normals': attrs['norm'], 'colors': attrs['color'],
-            'uvs': attrs['uv'], 'triangles': attrs['tri'], 'mat_index': mi,
+            'positions':  attrs['pos'], 'normals': attrs['norm'], 'colors': attrs['color'],
+            'uvs':        attrs['uv'],  'triangles': attrs['tri'], 'mat_index': mi,
+            'bone_index': self.current_bone_index,
         })
 
     # ------------------------------------------------------------------
@@ -3027,7 +3051,7 @@ def decompress_prs(data):
 # ============================================================
 _MODEL_EXTS   = {'.nj', '.gj', '.xj'}
 _TEXTURE_EXTS = {'.pvm', '.gvm'}
-_ANIM_EXTS    = {'.njm', '.gjm'}
+_ANIM_EXTS    = {'.njm'}
 
 def bml_read(data):
     """
@@ -3442,7 +3466,7 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
     )
     import_animations: BoolProperty(
         name="Import Animations",
-        description="Search the model's directory for .njm animation files and import them as Blender Actions (only for .nj / .xj models)",
+        description="Search the model's directory for .njm animation files and import them as Blender Actions",
         default=True,
     )
 
@@ -3530,10 +3554,10 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
             except Exception:
                 pass
 
-        # Import animations (.njm) from the same directory, for .nj / .xj models only
+        # Import animations (.njm) from the same directory
         total_actions = 0
         model_ext = os.path.splitext(filepath)[1].lower()
-        if self.import_animations and platform != 'GC' and model_ext in ('.nj', '.xj'):
+        if self.import_animations and model_ext in ('.nj', '.xj', '.gj'):
             model_dir = os.path.dirname(filepath)
             try:
                 dir_entries = os.listdir(model_dir)
