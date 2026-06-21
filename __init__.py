@@ -3827,13 +3827,16 @@ def _mat3_vec(m, v):
 
 def parse_njm(data):
     """Parse an NJM animation file (both NMDM/v2 and BB-footer variants).
-    Returns a dict with 'frame_count', 'interp', 'channels', 'tracks', or None on failure."""
+    Returns a dict with 'frame_count', 'interp', 'channels', 'tracks', or None on failure.
+    Handles both little-endian (DC/BB/PC) and big-endian (GC) byte ordering."""
     import math
     TWO_PI_OVER_65536 = 2.0 * math.pi / 65536.0
 
     if len(data) < 4:
         return None
 
+    # Start with a little-endian stream to read the magic / locate motion_start.
+    # Endianness is re-detected below once we know where motion_start is.
     bs = BitStream(data)
     magic = bs.readUInt()
 
@@ -3842,7 +3845,8 @@ def parse_njm(data):
         _chunk_size = bs.readUInt()
         motion_start = bs.tell()
     else:
-        # BB player format: footer at end of file holds indirection offsets
+        # BB player format: footer at end of file holds indirection offsets.
+        # BB files are always little-endian.
         if len(data) < 16:
             return None
         try:
@@ -3857,6 +3861,20 @@ def parse_njm(data):
 
     if motion_start + 12 > len(data):
         return None
+
+    # Detect byte order: m_data_table_rel must be a small positive integer.
+    # Try little-endian first; if it gives a nonsensical value, use big-endian (GC).
+    _trel_le = struct.unpack_from('<i', data, motion_start)[0]
+    _trel_be = struct.unpack_from('>i', data, motion_start)[0]
+    _sane    = lambda v: 4 <= v <= 4096
+    if _sane(_trel_le):
+        bo = '<'
+    elif _sane(_trel_be):
+        bo = '>'
+    else:
+        return None   # neither byte order gives a plausible table offset
+
+    bs = BitStream(data, big_endian=(bo == '>'))
 
     # Motion header: i32 mDataTableOffset, i32 frameCount, u16 type, u16 inpFn
     bs.seek(motion_start)
@@ -3903,8 +3921,8 @@ def parse_njm(data):
             break
         min_valid = m_data_table_rel + (i + 1) * bytes_per_bone
         for j in range(num_channels):
-            off = struct.unpack_from('<i', data, base + j * 4)[0]
-            cnt = struct.unpack_from('<i', data, base + num_channels * 4 + j * 4)[0]
+            off = struct.unpack_from(bo + 'i', data, base + j * 4)[0]
+            cnt = struct.unpack_from(bo + 'i', data, base + num_channels * 4 + j * 4)[0]
             if cnt > 0 and off >= min_valid:
                 if min_kf_off is None or off < min_kf_off:
                     min_kf_off = off
