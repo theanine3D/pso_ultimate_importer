@@ -12,9 +12,9 @@ Currently, the addon supports the following formats:
 
 | Platform      | Actors | Stages | Textures | Archives |
 |---------------|-------------|------------------|---------------|----------|
-| Dreamcast v2  | `.nj`       | `n.rel`           | `.pvm`        |   `.gsl`, `.bml`        |
+| Dreamcast v2  | `.nj`, `.njm`       | `n.rel`           | `.pvm`        |   `.gsl`, `.bml`        |
 | GameCube      | `.gj`       | `n.rel`           | `.gvm`        |   `.gsl`, `.bml`        |
-| Blue Burst    | `.xj`       | `n.rel`           | `.xvm`        |   `.gsl`, `.bml`        |
+| Blue Burst    | `.xj`,`.njm`       | `n.rel`           | `.xvm`        |   `.gsl`, `.bml`        |
 
 Import settings allow you to customize some quality-of-life features.
 - **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
@@ -29,7 +29,6 @@ You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "
 
 
 Currently, this addon does *not* support:
-- Animations / skeletons (planned)
 - Exporting models (not planned)
 
 ## Installation
