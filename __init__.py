@@ -1,7 +1,7 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
@@ -978,9 +978,14 @@ class NinjaStageGeometry:
 
         sz = self.bs.getSize()
         vlo = mesh['vertex_info_list_offset']
+        self.vertex_stack = {}
         if vlo and vlo < sz:
-            self.bs.seek(vlo)
-            self.readVertexList()
+            for vi in range(mesh['vertex_info_count']):
+                entry_off = vlo + vi * 16
+                if entry_off + 16 > sz:
+                    break
+                self.bs.seek(entry_off)
+                self.readVertexList()
 
         if mesh['triangle_strip_a_count']:
             aso = mesh['triangle_strip_list_a_offset']
@@ -1010,10 +1015,13 @@ class NinjaStageGeometry:
         if not vofs or vofs >= sz:
             return
         self.bs.seek(vofs)
-        self.vertex_stack = {}
 
         for i in range(vcount):
-            vertex = {'pos': None, 'norm': None, 'color': None, 'uv': None}
+            # Merge into existing vertex so that UV set by an earlier entry is
+            # not overwritten by a later entry that lacks UV data.
+            existing = self.vertex_stack.get(i)
+            vertex = {'pos': None, 'norm': None, 'color': None,
+                      'uv': existing['uv'] if existing else None}
 
             p = (self.bs.readFloat(), self.bs.readFloat(), self.bs.readFloat())
             vertex['pos'] = self.matrix.transformPoint(p)
@@ -1131,10 +1139,17 @@ class NinjaStageGeometry:
             pos_list.append(vert['pos'])
             if vert['norm']  is not None: norm_list.append(vert['norm'])
             if vert['color'] is not None: color_list.append(vert['color'])
-            if vert['uv']    is not None: uv_list.append(vert['uv'])
+            uv_list.append(vert['uv'])   # None entries resolved below
 
         if not pos_list:
             return
+
+        # Resolve UV list: preserve UVs when at least one vertex has them,
+        # filling (0,0) for any that don't (e.g. from a secondary vertex entry).
+        if any(uv is not None for uv in uv_list):
+            uv_list = [uv if uv is not None else (0.0, 0.0) for uv in uv_list]
+        else:
+            uv_list = []
 
         has_colors = bool(color_list)
 
@@ -1656,9 +1671,14 @@ class NinjaXJImporter:
 
         sz = self.bs.getSize()
         vlo = mesh['vertex_info_list_offset']
+        self.vertex_stack = {}
         if vlo and vlo < sz:
-            self.bs.seek(vlo)
-            self.readVertexList()
+            for vi in range(mesh['vertex_info_count']):
+                entry_off = vlo + vi * 16
+                if entry_off + 16 > sz:
+                    break
+                self.bs.seek(entry_off)
+                self.readVertexList()
 
         if mesh['triangle_strip_a_count']:
             aso = mesh['triangle_strip_list_a_offset']
