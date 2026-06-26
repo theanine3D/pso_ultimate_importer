@@ -1,7 +1,7 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
-    "version": (1, 1, 1),
+    "version": (1, 1, 2),
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
@@ -1265,38 +1265,18 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
             alpha_socket = tex_node.outputs['Alpha']
 
             # PSO uses mirror-repeat wrapping on all stage textures.
-            # Replicate with Ping Pong nodes on each UV axis.
+            tex_node.extension = 'MIRROR'
+
             uv_node = nodes.new('ShaderNodeUVMap')
             uv_node.uv_map = "UVMap"
-            uv_node.location = (-1200, 0)
-
-            sep = nodes.new('ShaderNodeSeparateXYZ')
-            sep.location = (-1000, 0)
-            links.new(uv_node.outputs['UV'], sep.inputs['Vector'])
-
-            pp_u = nodes.new('ShaderNodeMath')
-            pp_u.operation = 'PINGPONG'
-            pp_u.inputs[1].default_value = 1.0
-            pp_u.location = (-800, 70)
-            links.new(sep.outputs['X'], pp_u.inputs[0])
-
-            pp_v = nodes.new('ShaderNodeMath')
-            pp_v.operation = 'PINGPONG'
-            pp_v.inputs[1].default_value = 1.0
-            pp_v.location = (-800, -90)
-            links.new(sep.outputs['Y'], pp_v.inputs[0])
-
-            comb = nodes.new('ShaderNodeCombineXYZ')
-            comb.location = (-600, 0)
-            links.new(pp_u.outputs['Value'], comb.inputs['X'])
-            links.new(pp_v.outputs['Value'], comb.inputs['Y'])
-            links.new(comb.outputs['Vector'], tex_node.inputs['Vector'])
+            uv_node.location = (-650, 0)
+            links.new(uv_node.outputs['UV'], tex_node.inputs['Vector'])
 
             if tex_has_alpha:
                 gt_node = nodes.new('ShaderNodeMath')
                 gt_node.operation = 'GREATER_THAN'
                 gt_node.inputs[1].default_value = 0.5
-                gt_node.location = (-150, -200)
+                gt_node.location = (-120, 200)
                 links.new(tex_node.outputs['Alpha'], gt_node.inputs[0])
                 alpha_socket = gt_node.outputs['Value']
 
@@ -1304,8 +1284,8 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
                 # Exact blend used by the original game:
                 #   step 1 — vc_squared = Multiply(Col, Col)
                 #   step 2 — final      = Multiply(texture, vc_squared)
-                col_attr = nodes.new('ShaderNodeAttribute')
-                col_attr.attribute_name = "Col"
+                col_attr = nodes.new('ShaderNodeVertexColor')
+                col_attr.layer_name = "Col"
                 col_attr.location = (-400, -280)
 
                 vc_self_mul = nodes.new('ShaderNodeMixRGB')
