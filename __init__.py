@@ -2969,7 +2969,7 @@ class FlipperGCImporter:
             sec_mat = DashMat4()
             sec_mat.rotate(rot3)
             sec_mat.translate(pos3)
-            parent = {'matrix': sec_mat}
+            parent = {'matrix': sec_mat, 'idx': -1}
 
             # Read list_a (static meshes)
             list_a = []
@@ -3415,12 +3415,19 @@ def detect_platform(filepath):
         except OSError:
             pass
 
-    # Scan for GC geometry/texture-list magic bytes
+    # Scan for GC magic bytes
     try:
         with open(filepath, 'rb') as f:
             data = f.read()
         if b'GJCM' in data or b'GJTL' in data:
             return 'GC'
+        # GC stage n.rel files (incl. Episode 3) have no GJCM/GJTL but DO have a
+        # big-endian footer whose first uint points to a "fmt2" marker.
+        if len(data) >= 20:
+            import struct
+            table_ofs = struct.unpack_from('>I', data, len(data) - 16)[0]
+            if table_ofs + 4 <= len(data) and data[table_ofs:table_ofs+4] == b'fmt2':
+                return 'GC'
     except OSError:
         pass
 
