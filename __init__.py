@@ -1199,8 +1199,21 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
     bl_images_has_alpha = []   # True if any pixel has alpha < 255
     bl_images_is_solid  = []   # True if every pixel is identical (single solid color)
     for tex in geo.textures:
-        img = bpy.data.images.new(tex['name'], tex['width'], tex['height'], alpha=True)
         w, h = tex['width'], tex['height']
+        # Reuse an already-loaded image with the same name and dimensions so that
+        # importing multiple models from the same shared texture archive (e.g. a BML
+        # sidecar GVM) doesn't produce dozens of duplicate copies in bpy.data.images.
+        existing = bpy.data.images.get(tex['name'])
+        if existing and existing.size[0] == w and existing.size[1] == h:
+            # Reuse the already-decoded image; retrieve cached alpha/solid flags.
+            has_alpha = bool(existing.get('pso_has_alpha', False))
+            is_solid  = bool(existing.get('pso_is_solid',  False))
+            bl_images.append(existing)
+            bl_images_has_alpha.append(has_alpha)
+            bl_images_is_solid.append(is_solid)
+            continue
+
+        img = bpy.data.images.new(tex['name'], w, h, alpha=True)
         raw = tex['pixels']
         # Blender pixel buffer is RGBA floats, row 0 at the bottom, so flip Y
         floats = []
@@ -1218,6 +1231,8 @@ def build_blender_scene(geo, filepath, blend_vertex_colors=True):
                 floats += [raw[o]/255.0, raw[o+1]/255.0, raw[o+2]/255.0, a/255.0]
         img.pixels[:] = floats
         img.pack()
+        img['pso_has_alpha'] = has_alpha
+        img['pso_is_solid']  = is_solid
         bl_images.append(img)
         bl_images_has_alpha.append(has_alpha)
         bl_images_is_solid.append(is_solid)
@@ -2733,6 +2748,26 @@ class FlipperGCImporter:
         for o in sofs:
             self.bs.seek(o); self.texNames.append(self.bs.readString())
 
+        # If an external texture archive was pre-loaded (e.g. a shared BML sidecar
+        # GVM), the tex_id values in strip data are local GJTL indices (0, 1, 2 …),
+        # but the archive may have textures in a different global order.  Remap
+        # self.textures so that index 0 = texNames[0], 1 = texNames[1], etc.
+        # Only do this when the archive has real human-readable names; archives that
+        # lack a name table get generic "texture_NNN" names that won't match GJTL
+        # entries, so leave self.textures in direct-index order for those.
+        if self.textures and self.texNames:
+            has_real_names = any(not t['name'].startswith('texture_')
+                                 for t in self.textures)
+            if has_real_names:
+                name_to_tex = {t['name'].lower(): t for t in self.textures}
+                remapped = []
+                for name in self.texNames:
+                    matched = name_to_tex.get(name.lower())
+                    remapped.append(matched if matched else
+                                    {'name': name, 'width': 8, 'height': 8,
+                                     'pixels': bytes(8 * 8 * 4)})
+                self.textures = remapped
+
     def _readNode(self, pNode=None):
         if self._stop: return
         c = 2.0 * math.pi / 0x10000
@@ -2843,7 +2878,11 @@ class FlipperGCImporter:
             if t == 0x01: self._face_flags = val
             elif t == 0x08:
                 tid = val & 0x1FFF
-                self.material['texIndex'] = tid if tid < len(self.texNames) else -1
+                # Use GJTL count when available; fall back to the loaded archive
+                # size when no GJTL is present (BML models with a shared sidecar GVM
+                # store absolute GVM indices directly in the strip data).
+                tex_count = len(self.texNames) if self.texNames else len(self.textures)
+                self.material['texIndex'] = tid if tid < tex_count else -1
 
     def _readIndices(self, byte_len):
         ff      = self._face_flags
@@ -4194,6 +4233,11 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
     filename_ext = ".bml"
     filter_glob: StringProperty(default="*.bml", options={'HIDDEN'})
 
+    xvm_filepath: StringProperty(
+        name="Texture Archive",
+        description="Texture archive beside the BML (.xvm / .pvm / .gvm). Leave blank to auto-detect",
+        default="",
+    )
     blend_vertex_colors: BoolProperty(
         name="Blend Vertex Colors",
         description="Apply vertex colors as lighting in the scene",
@@ -4217,6 +4261,10 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
 
     def draw(self, context):
         l = self.layout
+        l.label(text="Texture Archive (.xvm / .pvm / .gvm):")
+        l.prop(self, "xvm_filepath", text="")
+        l.label(text="(leave blank to auto-detect)")
+        l.separator()
         l.prop(self, "blend_vertex_colors")
         l.prop(self, "disable_color_correction")
         l.prop(self, "extend_clip_distance")
@@ -4283,13 +4331,19 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             self.report({'WARNING'}, "No importable models (.nj/.gj/.xj) found in BML")
             return {'CANCELLED'}
 
-        # Try to load a sidecar texture archive that lives beside the .bml
-        # (same base name, extension .gvm / .pvm / .xvm).  Used as a fallback
-        # for models whose BML entry carries no embedded texture.
+        # Load a sidecar texture archive used as a fallback for models whose BML
+        # entry carries no embedded texture.
+        # Priority: manually specified path → same-base-name file beside the BML.
         sidecar_textures = []
+        bml_dir  = os.path.dirname(filepath)
         bml_stem = os.path.splitext(filepath)[0]
-        for tex_ext in ('.gvm', '.GVM', '.pvm', '.PVM', '.xvm', '.XVM'):
-            candidate = bml_stem + tex_ext
+        manual_tex = self.xvm_filepath.strip()
+        if manual_tex:
+            sidecar_candidates = [os.path.join(bml_dir, manual_tex)]
+        else:
+            sidecar_candidates = [bml_stem + e
+                                  for e in ('.gvm', '.GVM', '.pvm', '.PVM', '.xvm', '.XVM')]
+        for candidate in sidecar_candidates:
             if os.path.exists(candidate):
                 try:
                     with open(candidate, 'rb') as f:
@@ -4328,7 +4382,6 @@ class IMPORT_OT_pso_bml(Operator, ImportHelper):
             #    (e.g. robby_cat.GVM beside the .bml for robby_cat.nj)
             if not textures:
                 model_stem = os.path.splitext(name)[0]
-                bml_dir    = os.path.dirname(filepath)
                 for tex_ext in ('.gvm', '.GVM', '.pvm', '.PVM', '.xvm', '.XVM'):
                     candidate = os.path.join(bml_dir, model_stem + tex_ext)
                     if os.path.exists(candidate):
