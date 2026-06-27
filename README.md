@@ -45,6 +45,7 @@ You can find the importers via Blender's "_FIle_" -> "_Import_" menu.
 - BML files often contain more than 1 model. When you import a BML, you'll often see multiple models/characters/enemies jumbled together in the middle of your Blender scene. To isolate the one you want, turn off all of the collections in the Outliner, and enable only one collection at a time, so you can see each one clearly. 
 - This addon will setup most materials for you automatically. However, any materials with blended transparency, emissive effects, or animations will still require manual setup. My other addon, [Material Batch Tools](https://extensions.blender.org/add-ons/matbatchtools/), helps make this a lot faster - in particular, the material templates feature, set to "Additive + Texture + Color" can fix any selected glowing/emissive meshes with just one click.
 - Animations can be found / assigned via the Dope Sheet's Action Editor. Select your armature first in the 3D viewport, then select the action in the Action Editor. If animations don't play, you may need to assign the "Object" in the Slot setting (second dropdown menu at the top of the action editor), which was added in Blender 4.4.
+- NPCs are often stored in files that have the text strings "bm_n" or "npc" in their name (ie. bm_n_leo_w_body.bml in GC Episode 3). Props like teleports, doors, and warps are often found in files that have the word "common" in their name (ie. bm_obj_city_common.bml). 
 
 ## Previews
 
