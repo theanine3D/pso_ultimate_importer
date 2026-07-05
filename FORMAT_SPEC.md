@@ -1,8 +1,8 @@
 # Phantasy Star Online Model, Stage, Texture & Animation Format Specification
 
 This document is a standalone, byte-accurate specification for the model, stage,
-texture, and animation formats used by Phantasy Star Online (PSO) across its
-three platform releases: **Dreamcast (DC)**, **PC / Blue Burst (BB)**, and
+texture, and animation formats used by Phantasy Star Online (PSO) across three of
+its platform releases: **Dreamcast (DC)**, **PC / Blue Burst (BB)**, and
 **GameCube / Episode I & II & III (GC)**. It is intended to allow an independent
 programmer to write a parser or importer for any of these formats without
 access to the PSO Ultimate Importer's Python code.
