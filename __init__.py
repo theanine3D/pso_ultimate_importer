@@ -1887,21 +1887,7 @@ class NinjaChunkMixin:
             if bs.pos + 2 > bs.getSize():
                 break   # not enough bytes left for any chunk header
             if gc:
-                # GC big-endian NJ: chunk header words are stored BE.
-                # "No-length" chunk types (NJD_CN/CE, BITS, TINY, STRIP, VOLUME, MATERIAL):
-                #   first BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
-                #   the individual handlers then read a length word on their own.
-                # "With-length" chunk types (VERTEX only):
-                #   first BE uint16  = length word
-                #   second BE uint16 = ch_cf word  (ch in low byte, cf in high byte)
-                #
-                # Disambiguation problem: a vertex chunk's length word has its LOW BYTE
-                # equal to (4 + vcount*vsz) / 4, which can land in the TINY (8-9, 16-31)
-                # or BITS (1-5) range for small vcount values.  When that happens the
-                # heuristic below would misidentify the length word as a no-len ch_cf.
-                # Guard against this by peeking at the NEXT word whenever ch_cand falls
-                # in CHUNK_TINY or CHUNK_BITS: if that word's low byte is a VERTEX type
-                # we know word0 was actually the length of a vertex chunk.
+                # GC chunk header disambiguation — see FORMAT_SPEC.md §2.5.1.
                 word0 = bs.readUShort()
                 ch_cand = word0 & 0xFF
                 no_len = (ch_cand == 0 or ch_cand == 0xFF or
@@ -1911,25 +1897,13 @@ class NinjaChunkMixin:
                           ch_cand in CHUNK_VOLUME or
                           0x10 <= ch_cand <= 0x1F)
                 if no_len and ch_cand not in (0, 0xFF):
-                    # Disambiguation: in GC format every vertex chunk is preceded
-                    # by a length word whose low byte can coincide with any no-len
-                    # chunk type (TINY=8-9, BITS=1-5, STRIP=64-75, VOLUME=56-58,
-                    # MATERIAL=17-23, etc.).  Peek at the next word: if its low
-                    # byte is a VERTEX chunk type (32-50) then word0 was the
-                    # vertex-chunk length, not a no-len ch_cf.
+                    # Peek next word: could be the real ch_cf, or word0 could be a
+                    # vertex-chunk length whose low byte aliases a no-len type.
                     if bs.pos + 2 <= bs.getSize():
                         peek_pos = bs.pos
                         word1_peek = bs.readUShort()
                         vc_ch = word1_peek & 0xFF
                         if vc_ch in CHUNK_VERTEX:
-                            # Candidate: word0 is the vertex-chunk length, word1 is ch_cf.
-                            # Validate with two conditions:
-                            #  1. (word0*4 - 4) must be divisible by the per-vertex size.
-                            #  2. The expected vcount must equal the actual vcount word in
-                            #     the stream (immediately after word1).
-                            # Together these reject false positives where a STRIP ch_cf is
-                            # followed by a clen whose low byte falls in the VERTEX range
-                            # (e.g. NJD_CS_UVN with clen=288 whose low byte is 0x20=32).
                             vsz = _GC_VERTEX_SIZE.get(vc_ch, 12)
                             body_bytes = word0 * 4 - 4   # bytes of data after vcount+vofs
                             is_vertex = False
@@ -2184,18 +2158,7 @@ class NinjaChunkMixin:
 # POF0 relocation helpers
 # ============================================================
 def parse_pof0(payload):
-    """
-    Decode a POF0 relocation payload into a list of byte offsets.
-    Each offset marks a location within the NJCM payload that holds a
-    pointer value needing the serialization base subtracted.
-
-    Encoding: variable-length difference-coded.  Each byte's top 2 bits
-    choose the jump width:
-      0x01-0x3F  small  — advance by (byte * 4)
-      0x40-0x7F  medium — advance by ((byte & 0x3F) << 8  | next) * 4
-      0x80-0xBF  large  — advance by ((byte & 0x3F) << 16 | next2) * 4
-      0x00       end of list
-    """
+    """Decode a POF0 relocation payload into a list of byte offsets. See FORMAT_SPEC.md §2.6."""
     offsets = []
     pos = 0
     current = 0
@@ -2225,25 +2188,7 @@ def parse_pof0(payload):
 
 
 def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
-    """
-    Patch an NJCM payload using a POF0 relocation table.
-
-    Reads the pointer values at every offset listed in the POF0 table.
-    If any pointer exceeds the payload size, a serialization base B is
-    inferred and subtracted from every non-zero pointer in the table.
-
-    Base detection: iterate over candidate "true minimum offsets" (the
-    target of the smallest non-null pointer in the file, typically 52 for
-    the first child bone) to derive a candidate B = min_raw_ptr - true_min.
-    Each candidate is validated by checking that:
-      (a) all non-zero adjusted pointers stay inside the payload, and
-      (b) the adjusted targets of the childOfs/siblingOfs fields at known
-          bone-node offsets (44, 48, 96, 100, …) look like valid NJ bone
-          flags (<= 0x3FFF).
-
-    Returns a new bytes object (the patched payload), or the original
-    payload unchanged if no relocation is necessary or no valid B found.
-    """
+    """Patch an NJCM payload's pointers using a POF0 relocation table. See FORMAT_SPEC.md §2.6."""
     ptr_offsets = parse_pof0(pof0_payload)
     if not ptr_offsets:
         return njcm_payload
@@ -2265,11 +2210,7 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
     if not non_zero_vals or max(non_zero_vals) < payload_size:
         return njcm_payload  # all pointers already valid
 
-    # Some files mix already-valid pointers (< payload_size) with clearly
-    # invalid ones (≥ payload_size).  Compute B only from the invalid
-    # ones — they supply the lower bound on B.  After applying B the
-    # valid-looking pointers (which also have base embedded) just become
-    # smaller and remain in-range.
+    # Derive B from invalid (out-of-range) pointers only; see FORMAT_SPEC.md §2.6.
     invalid_vals = [v for v in non_zero_vals if v >= payload_size]
     valid_vals   = [v for v in non_zero_vals if v <  payload_size]
 
@@ -2279,23 +2220,13 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
     min_inv = min(invalid_vals)
     max_inv = max(invalid_vals)
 
-    # B must:
-    #   (a) bring every invalid pointer in-range:  max_inv - B < payload_size
-    #                                           →  B > max_inv - payload_size
-    #   (b) keep every invalid pointer positive:   min_inv - B ≥ 4
-    #                                           →  B ≤ min_inv - 4
-    #   (c) keep every valid-but-relocated ptr positive:
-    #                                              B < min(valid_vals) if any
     b_lo = (max_inv - payload_size + 4) & ~3
     b_hi = (min_inv - 4) & ~3
     if valid_vals:
         b_hi = min(b_hi, (min(valid_vals) - 4) & ~3)
 
     if b_lo > b_hi:
-        # Invalid pointer values span a range larger than the payload; the
-        # POF0 for this chunk likely uses absolute file offsets rather than
-        # NJCM-relative offsets.  Skip relocation — the parser will fall back
-        # to whatever valid pointers already exist in the payload.
+        # Likely an absolute-offset POF0 rather than NJCM-relative — skip relocation.
         print("[PSO POF0] Skipping relocation: invalid pointer range "
               "(0x%X..0x%X) exceeds payload size %d — "
               "probable absolute-offset POF0" % (min_inv, max_inv, payload_size))
@@ -2308,16 +2239,10 @@ def apply_pof0_relocation(njcm_payload, pof0_payload, big_endian=False):
         flags, = struct.unpack_from(bo + 'I', njcm_payload, offset)
         return flags <= 0x3FFF
 
-    # The root bone is always at NJCM offset 0 (NJ spec).
-    # Its childOfs field is at offset 44 and siblingOfs at offset 48.
-    # These are always bone pointers (never mesh pointers), so their targets
-    # reliably start with an NJ flags word.  Use them as anchor samples for
-    # the structure check; fall back to the first 5 non-zero values if
-    # neither root-bone field appears in the relocation table.
+    # Root bone's childOfs/siblingOfs (offsets 44/48) are reliable bone-pointer
+    # anchors for the structure check; fall back to first 5 invalid values otherwise.
     ptr_off_map = {off: v for off, v in raw_ptrs if v != 0}
     bone_ptr_vals = [ptr_off_map[k] for k in (44, 48) if k in ptr_off_map]
-    # Only sample invalid-range values; valid-range values could be mesh
-    # pointers whose targets don't start with a bone-flags word.
     invalid_bone_samples = [v for v in bone_ptr_vals if v >= payload_size]
     sample_vals = (invalid_bone_samples if invalid_bone_samples
                    else [v for v in invalid_vals[:5]])
@@ -2446,30 +2371,15 @@ class NinjaDCImporter(NinjaChunkMixin):
                 c = os.path.splitext(os.path.basename(rn))[0]
                 if c: self.textures[idx]['name'] = c
 
-        # ── POF0 relocation: patch NJCM payload if a relocation table exists ──
-        # Some NJ files (notably certain GC boss models) are compiled with a
-        # non-zero serialization base, meaning their pointer values include an
-        # extra addend that must be subtracted before the offsets are usable.
-        # POF0 lists exactly which 32-bit words in the NJCM payload are pointers
-        # so we can patch them without guessing the struct layout.
-        #
-        # Some files contain TWO POF0 chunks: a small one before the NJCM that
-        # relocates NJTL pointers, and a larger one AFTER the NJCM that relocates
-        # the bone/mesh pointers inside NJCM.  Always prefer the POF0 whose
-        # payload starts after the NJCM ends; fall back to the first one if no
-        # such chunk exists.
+        # POF0 relocation (some GC boss models ship with a non-zero serialization
+        # base baked into their pointers). See FORMAT_SPEC.md §2.6.
         pof0_chunks = chunk_map.get(MAGIC_POF0, [])
 
         for off, clen in chunk_map.get(MAGIC_NJCM, []):
             njcm_bytes = data[off : off + clen]
             if pof0_chunks:
-                # Before-NJCM POF0 chunks carry NJTL texture-list pointers, not
-                # NJCM bone/mesh pointers — never apply them to the NJCM payload.
-                # Only use a POF0 that appears after the NJCM in the file, and
-                # only when the root bone's pointer fields are not already valid
-                # (i.e. the file has a non-zero serialization base, as with GC
-                # boss models like the gryphon).  DC/BB models whose NJCM pointers
-                # are already in-range are left untouched.
+                # Only apply a POF0 chunk located after NJCM ends, and only if the
+                # root bone's pointers aren't already valid (DC/BB models: no-op).
                 bo_str = '>' if big_endian else '<'
                 root_needs_reloc = True
                 if len(njcm_bytes) >= 52:
