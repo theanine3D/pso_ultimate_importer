@@ -8,7 +8,7 @@ This addon is based on the format reverse-engineering work by Benjamin Collins (
 Need help with this addon? Join the [Realitea Discord](https://discord.gg/43ggeGC8A8) and ask for help.
 
 ## Features
-Currently, the addon supports the following formats:
+Currently, the addon supports the following [formats](https://github.com/theanine3D/pso_ultimate_importer/wiki/Format-Specification):
 
 | Platform      | Actors | Stages | Textures | Archives |
 |---------------|-------------|------------------|---------------|----------|
