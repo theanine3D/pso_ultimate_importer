@@ -1,7 +1,7 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
-    "version": (1, 1, 2),
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
@@ -2494,6 +2494,154 @@ class NinjaDCImporter(NinjaChunkMixin):
 
 
 # ============================================================
+# Pointer-rooted .rel model importer (e.g. GC Episode III npc_*_data.rel)
+# ============================================================
+def _rel_node_ok(data, o, bo):
+    """True if o could be an NJ bone node (sane flags, unit-ish scale, in-bounds pointers)."""
+    n = len(data)
+    if o <= 0 or o & 3 or o + 52 > n:
+        return False
+    if struct.unpack_from(bo + 'I', data, o)[0] > 0x3FFF:
+        return False
+    if not all(0.01 <= abs(s) <= 100.0 for s in struct.unpack_from(bo + 'fff', data, o + 32)):
+        return False
+    ptrs = (struct.unpack_from(bo + 'I', data, o + 4)[0],) + struct.unpack_from(bo + 'II', data, o + 44)
+    return all(not p or (not p & 3 and p < n) for p in ptrs)
+
+
+def _rel_tex_list_names(data, o, bo):
+    """Names of an NJTL-style (list_ofs, count) header at o, or None if it isn't one."""
+    if o <= 0 or o & 3 or o + 8 > len(data):
+        return None
+    lofs, cnt = struct.unpack_from(bo + 'II', data, o)
+    if not (1 <= cnt <= 256 and lofs + cnt * 12 == o):
+        return None
+    names = []
+    for k in range(cnt):
+        p = struct.unpack_from(bo + 'I', data, lofs + k * 12)[0]
+        end = data.find(b'\0', p, lofs) if p < lofs else -1
+        if end <= p:
+            return None
+        try:
+            names.append(data[p:end].decode('ascii'))
+        except UnicodeDecodeError:
+            return None
+    return names
+
+
+def rel_model_info(data):
+    """Return {'big_endian', 'roots', 'tex_names'} if data is a pointer-rooted REL model, else None.
+    The footer slot lists root node pointers and optionally one texture-list pointer.
+    See FORMAT_SPEC.md §7.5."""
+    n = len(data)
+    if n < 0x40 or n & 3:
+        return None
+    for bo in ('>', '<'):
+        slot = struct.unpack_from(bo + 'I', data, n - 16)[0]
+        tbl, cnt = struct.unpack_from(bo + 'II', data, n - 0x20)
+        if slot & 3 or not (slot < tbl < n - 0x20 and cnt > 0 and tbl + cnt * 2 <= n - 0x20):
+            continue
+        roots, tex_names = [], None
+        for p in struct.unpack_from(bo + '%dI' % min(64, (tbl - slot) // 4), data, slot):
+            if not p:
+                break
+            if _rel_node_ok(data, p, bo):
+                if p not in roots:
+                    roots.append(p)
+                continue
+            names = _rel_tex_list_names(data, p, bo) if tex_names is None else None
+            if names is None:
+                roots = []
+                break
+            tex_names = names
+        if not roots:
+            continue
+        if tex_names is None:
+            tex_names = find_rel_tex_list(data, bo, min(roots))
+        return {'big_endian': bo == '>', 'roots': roots, 'tex_names': tex_names}
+    return None
+
+
+def find_rel_tex_list(data, bo, limit):
+    """Find the unreferenced NJTL-style (list_ofs, count) header by structure; returns names."""
+    for o in range(12, min(limit, 0x2000), 4):
+        names = _rel_tex_list_names(data, o, bo)
+        if names is not None:
+            return names
+    return []
+
+
+def _archive_tex_names(data):
+    """Read texture names from a GVM/PVM header without decoding pixels ([] if unnamed)."""
+    for magic, bo in ((b'GVMH', '>'), (b'PVMH', '<')):
+        pos = data.find(magic, 0, 0x100)
+        if pos < 0:
+            continue
+        pos += 8
+        flags, count = struct.unpack_from(bo + 'HH', data, pos); pos += 4
+        if not flags & 0x08:
+            return []
+        names = []
+        for _ in range(count):
+            pos += 2
+            names.append(data[pos:pos + 0x1C].split(b'\0')[0].decode('ascii', 'ignore'))
+            pos += 0x1C
+            if flags & 0x04: pos += 2
+            if flags & 0x02: pos += 2
+            if flags & 0x01: pos += 4
+        return names
+    return []
+
+
+def find_rel_model_tex(filepath, tex_names):
+    """Pick the archive beside a .rel model whose texture names best cover tex_names.
+    Filenames don't reliably match (npc_a00_data.rel -> n_A00_w_body.GVM)."""
+    wanted = {os.path.splitext(n)[0].lower() for n in tex_names}
+    if not wanted:
+        return None
+    folder = os.path.dirname(filepath)
+    try:
+        entries = sorted(os.listdir(folder))
+    except OSError:
+        return None
+    best, best_hits = None, 0
+    for entry in entries:
+        if os.path.splitext(entry)[1].lower() not in ('.gvm', '.pvm'):
+            continue
+        path = os.path.join(folder, entry)
+        try:
+            with open(path, 'rb') as f:
+                names = _archive_tex_names(f.read(0x10000))
+        except (OSError, struct.error):
+            continue
+        hits = len(wanted & {os.path.splitext(n)[0].lower() for n in names})
+        if hits > best_hits:
+            best, best_hits = path, hits
+    return best
+
+
+class NinjaRelModelImporter(NinjaDCImporter):
+    """Bare NJ bone tree inside a pointer-rooted REL container. See FORMAT_SPEC.md §7.5."""
+
+    def parse(self, data):
+        info = rel_model_info(data)
+        if info is None:
+            raise ValueError("not a pointer-rooted .rel model")
+        self.texNames = info['tex_names']
+        if self.textures and self.texNames:
+            by_name = {t['name'].lower(): t for t in self.textures}
+            if all(n.lower() in by_name for n in self.texNames):
+                self.textures = [by_name[n.lower()] for n in self.texNames]
+            else:
+                for idx, name in enumerate(self.texNames[:len(self.textures)]):
+                    self.textures[idx]['name'] = name
+        self.bs = BitStream(data, big_endian=info['big_endian'])
+        for root in info['roots']:
+            self.bs.seek(root)
+            self._readBone()
+
+
+# ============================================================
 # DC .rel stage importer
 # ============================================================
 class NinjaDCRelImporter(NinjaChunkMixin):
@@ -3377,22 +3525,25 @@ def detect_platform(filepath):
             table_ofs = struct.unpack_from('>I', data, len(data) - 16)[0]
             if table_ofs + 4 <= len(data) and data[table_ofs:table_ofs+4] == b'fmt2':
                 return 'GC'
+        info = rel_model_info(data)
+        if info is not None:
+            return 'GC' if info['big_endian'] else 'DC'
     except OSError:
         pass
 
     return 'BB'
 
 # ============================================================
-# PSO Actor Model operator  (.xj / .nj / .gj)
+# PSO Actor Model operator  (.xj / .nj / .gj / model .rel)
 # ============================================================
 class IMPORT_OT_pso_actor(Operator, ImportHelper):
     bl_idname      = "import_scene.pso_actor"
     bl_label       = "PSO Actor Model"
-    bl_description = "Import a Phantasy Star Online character or prop model (.xj / .nj / .gj)"
+    bl_description = "Import a Phantasy Star Online character or prop model (.xj / .nj / .gj / .rel)"
     bl_options     = {'REGISTER', 'UNDO'}
 
     filename_ext = ""
-    filter_glob: StringProperty(default="*.xj;*.nj;*.gj", options={'HIDDEN'})
+    filter_glob: StringProperty(default="*.xj;*.nj;*.gj;*.rel", options={'HIDDEN'})
 
     platform: EnumProperty(
         name="Platform",
@@ -3425,6 +3576,11 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
         description="Search the model's directory for .njm animation files and import them as Blender Actions",
         default=True,
     )
+    motion_filepath: StringProperty(
+        name="Motion Library",
+        description="Motion library .rel in the same folder (e.g. PlyMotionData.rel). Leave blank to skip",
+        default="",
+    )
 
     def draw(self, context):
         l = self.layout
@@ -3442,6 +3598,9 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
         l.prop(self, "disable_color_correction")
         l.prop(self, "extend_clip_distance")
         l.prop(self, "import_animations")
+        l.label(text="Motion Library (.rel):")
+        l.prop(self, "motion_filepath", text="")
+        l.label(text="(leave blank to skip)")
 
     def execute(self, context):
         filepath = self.filepath
@@ -3450,6 +3609,12 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
                 model_data = f.read()
         except OSError as e:
             self.report({'ERROR'}, "Cannot open: %s" % e)
+            return {'CANCELLED'}
+
+        model_ext = os.path.splitext(filepath)[1].lower()
+        rel_info  = rel_model_info(model_data) if model_ext == '.rel' else None
+        if model_ext == '.rel' and rel_info is None:
+            self.report({'ERROR'}, "This .rel file contains no model (use PSO Stage Model for n.rel stages)")
             return {'CANCELLED'}
 
         platform = self.platform
@@ -3461,8 +3626,12 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
         # ── Resolve texture archive ──────────────────────────────────────────
         manual_name = self.xvm_filepath.strip()
         textures = []
+        rel_tex_path = None
+        if rel_info and not manual_name:
+            rel_tex_path = find_rel_model_tex(filepath, rel_info['tex_names'])
         tex_path = (os.path.join(os.path.dirname(filepath), manual_name) if manual_name
-                    else find_compound_tex_path(filepath) or find_tex_archive(filepath, platform))
+                    else rel_tex_path or find_compound_tex_path(filepath)
+                    or find_tex_archive(filepath, platform))
 
         if tex_path and os.path.exists(tex_path):
             try:
@@ -3480,7 +3649,9 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
             print("[%s] Texture archive not found — tried: %s" % (label, tried))
 
         # ── Parse geometry ───────────────────────────────────────────────────
-        if platform == 'BB':
+        if rel_info:
+            geo = NinjaRelModelImporter()
+        elif platform == 'BB':
             geo = NinjaXJImporter()
         elif platform == 'DC':
             geo = NinjaDCImporter()
@@ -3512,8 +3683,7 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
 
         # Import animations (.njm) from the same directory
         total_actions = 0
-        model_ext = os.path.splitext(filepath)[1].lower()
-        if self.import_animations and model_ext in ('.nj', '.xj', '.gj'):
+        if self.import_animations and model_ext in ('.nj', '.xj', '.gj', '.rel'):
             model_dir = os.path.dirname(filepath)
             try:
                 dir_entries = os.listdir(model_dir)
@@ -3535,6 +3705,26 @@ class IMPORT_OT_pso_actor(Operator, ImportHelper):
                     total_actions += 1
                 except Exception as e:
                     self.report({'WARNING'}, "Animation import error for %s: %s" % (fname, e))
+
+        motion_name = self.motion_filepath.strip()
+        if self.import_animations and motion_name:
+            motion_path = os.path.join(os.path.dirname(filepath), motion_name)
+            try:
+                with open(motion_path, 'rb') as f:
+                    motions = parse_rel_motions(f.read())
+            except OSError as e:
+                motions = []
+                self.report({'WARNING'}, "Cannot open motion library: %s" % e)
+            else:
+                if not motions:
+                    self.report({'WARNING'}, "No motions found in %s" % motion_name)
+            stem = os.path.splitext(os.path.basename(motion_path))[0]
+            for i, njm in enumerate(motions):
+                try:
+                    build_blender_action("%s_%03d" % (stem, i), njm)
+                    total_actions += 1
+                except Exception as e:
+                    self.report({'WARNING'}, "Motion %d import error: %s" % (i, e))
 
         self.report({'INFO'}, "Imported %d mesh(es), %d texture(s), %d action(s) from %s" % (
             mesh_count, len(textures), total_actions, os.path.basename(filepath)))
@@ -3761,6 +3951,19 @@ def _mat3_from_njm_euler(rx, ry, rz):
     ]
 
 
+def _mat3_from_quat(w, x, y, z):
+    """3x3 column-vector rotation matrix from a unit quaternion (same convention as
+    DashMat4.rotate4, transposed for column vectors)."""
+    n = math.sqrt(w*w + x*x + y*y + z*z) or 1.0
+    w, x, y, z = w/n, x/n, y/n, z/n
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    wx, wy, wz = w*x, w*y, w*z
+    return [[1 - 2*(yy + zz), 2*(xy - wz),     2*(xz + wy)],
+            [2*(xy + wz),     1 - 2*(xx + zz), 2*(yz - wx)],
+            [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)]]
+
+
 def _euler_from_mat3_njm(m):
     """Extract NJ ZYX intrinsic euler (rx, ry, rz) from 3x3 column-vector matrix."""
     import math as _m
@@ -3913,6 +4116,53 @@ def parse_njm(data):
     element_count = (min_kf_off - m_data_table_rel) // bytes_per_bone
     if element_count <= 0:
         return None
+    return _decode_motion(data, bo, motion_start, table_abs, frame_count, interp, channels, element_count)
+
+
+def _compact_frames_ok(data, bo, o, cnt, frame_count):
+    """True if keys at o read as 8-byte compact keys: strictly increasing u16 frames <= frame_count."""
+    n = min(cnt, 8)
+    if o + 8 * n > len(data):
+        return False
+    frames = [struct.unpack_from(bo + 'H', data, o + 8 * k)[0] for k in range(n)]
+    return (frames[0] < frame_count and all(f <= frame_count for f in frames)
+            and all(b > a for a, b in zip(frames, frames[1:])))
+
+
+def _decode_motion(data, bo, ptr_base, table_abs, frame_count, interp, channels, element_count):
+    """Decode per-bone keyframe tracks from a Ninja motion table. Keyframe offsets are
+    relative to ptr_base (motion header for .njm files, 0 for absolute REL pointers)."""
+    TWO_PI_OVER_65536 = 2.0 * math.pi / 65536.0
+    bs             = BitStream(data, big_endian=(bo == '>'))
+    num_channels   = len(channels)
+    bytes_per_bone = num_channels * 8
+
+    # Euler keys are 8 bytes (u16 fields) or 16 bytes (i32 fields); decide per track.
+    # Compact frames must strictly increase: a big-endian 16-byte key's leading u16 is 0.
+    # See FORMAT_SPEC.md §6.4.
+    euler_sizes = {}
+    motion_euler_size = None
+    if 'euler' in channels:
+        ei = channels.index('euler')
+        entries = []
+        for b in range(element_count):
+            row = table_abs + b * bytes_per_bone
+            if row + bytes_per_bone > len(data):
+                break
+            offs = struct.unpack_from(bo + '%di' % num_channels, data, row)
+            cnts = struct.unpack_from(bo + '%di' % num_channels, data, row + num_channels * 4)
+            entries += [(ptr_base + offs[i], cnts[i], b, i) for i in range(num_channels) if cnts[i] > 0]
+        starts = sorted({e[0] for e in entries} | {table_abs, len(data)})
+        for o, cnt, b, i in entries:
+            if i != ei or not 0 <= o < len(data):
+                continue
+            if cnt > 1:
+                euler_sizes[b] = 8 if _compact_frames_ok(data, bo, o, cnt, frame_count) else 16
+            elif next(s for s in starts if s > o) == o + 8:
+                euler_sizes[b] = 8   # a 16-byte gap may be an 8-byte key plus padding
+        decided = list(euler_sizes.values())
+        if decided:
+            motion_euler_size = max(set(decided), key=decided.count)
 
     tracks = []
     for bone_idx in range(element_count):
@@ -3932,7 +4182,7 @@ def parse_njm(data):
         for ch_idx, ch_name in enumerate(channels):
             off = ch_offsets[ch_idx]
             cnt = ch_counts[ch_idx]
-            abs_off = motion_start + off
+            abs_off = ptr_base + off
 
             if cnt <= 0 or abs_off >= len(data):
                 continue
@@ -3947,25 +4197,9 @@ def parse_njm(data):
                     bone_data['position'].append((frame, x, y, z))
 
             elif ch_name == 'euler':
-                # Detect compact (8-byte) vs wide (16-byte) encoding.
-                # Compact frames are u16 and must be monotonically increasing and < frameCount.
-                compact = True
-                if cnt > 0:
-                    bs.seek(abs_off)
-                    first_f = bs.readUShort()
-                    if first_f >= frame_count:
-                        compact = False
-                    else:
-                        prev = first_f
-                        for k in range(1, min(cnt, 8)):
-                            bs.seek(abs_off + k * 8)
-                            f = bs.readUShort()
-                            if f < prev:
-                                compact = False
-                                break
-                            prev = f
-
-                kf_size = 8 if compact else 16
+                kf_size = (euler_sizes.get(bone_idx) or motion_euler_size
+                           or (8 if _compact_frames_ok(data, bo, abs_off, cnt, frame_count) else 16))
+                compact = kf_size == 8
                 for k in range(cnt):
                     kf = abs_off + k * kf_size
                     if kf + kf_size > len(data): break
@@ -4013,6 +4247,40 @@ def parse_njm(data):
     }
 
 
+def parse_rel_motions(data):
+    """Parse a REL motion library (e.g. GC Episode III PlyMotionData.rel) into NJM-style dicts.
+    See FORMAT_SPEC.md §6.6."""
+    n = len(data)
+    if n < 0x40 or n & 3:
+        return []
+    for bo in ('>', '<'):
+        slot = struct.unpack_from(bo + 'I', data, n - 16)[0]
+        if slot & 3 or slot + 4 > n:
+            continue
+        table = struct.unpack_from(bo + 'I', data, slot)[0]
+        if table & 3 or not 0 < table < slot or (slot - table) % 8:
+            continue
+        motions = []
+        for pos in range(table, slot, 8):
+            p = struct.unpack_from(bo + 'I', data, pos + 4)[0]
+            if p & 3 or not 0 < p <= n - 12:
+                break
+            mdata, frames, mtype, inp_fn = struct.unpack_from(bo + 'IIHH', data, p)
+            channels = [c for c, bit in (('position', 0x1), ('euler', 0x2),
+                                         ('quaternion', 0x2000), ('scale', 0x4)) if mtype & bit]
+            row = len(channels) * 8
+            span = p - mdata
+            # mtype bits outside the bone channels (e.g. 0x1C1 camera motions) are not skeletal
+            if (mtype & ~0x2007 or not channels or mdata & 3 or frames <= 0
+                    or not 0 < span <= 1024 * row or span % row):
+                break
+            interp = 1 if inp_fn & 0x40 else 0
+            motions.append(_decode_motion(data, bo, 0, mdata, frames, interp, channels, span // row))
+        if motions and len(motions) == (slot - table) // 8:
+            return motions
+    return []
+
+
 def build_blender_action(action_name, njm):
     """Create a bpy.data.actions Action from parsed NJM data. Returns the Action."""
     action              = bpy.data.actions.new(name=action_name)
@@ -4040,15 +4308,16 @@ def build_blender_action(action_name, njm):
     def new_fc(data_path, index, group):
         return fcurves.new(data_path=data_path, index=index, **{group_kw: group})
 
-    # Find the best-matching armature by name similarity, with bone count as tiebreaker
+    # Find the best-matching armature: a matching bone count outweighs any name
+    # similarity (a 3-bone prop must never win an action for a 55-bone body);
+    # name similarity breaks ties between armatures with the same bone count.
     element_count = njm.get('element_count', 0)
     arm_obj = None
     if _pso_armatures:
         best_score = -1
         for stem, bone_count, candidate in _pso_armatures:
             lcs = _longest_common_substring(action_name, stem)
-            # Prefer longer name match; use bone-count match as a secondary boost
-            score = lcs * 2 + (1 if bone_count == element_count else 0)
+            score = lcs + (1000 if bone_count == element_count else 0)
             if score > best_score:
                 best_score = score
                 arm_obj = candidate
@@ -4097,12 +4366,19 @@ def build_blender_action(action_name, njm):
                 fc.update()
 
         if bone_data.get('quaternion'):
-            for comp_i in range(4):
-                fc = new_fc("%s.rotation_quaternion" % prefix, comp_i, bone_name)
-                fc.keyframe_points.add(len(bone_data['quaternion']))
-                for ki, (frame, w, x, y, z) in enumerate(bone_data['quaternion']):
+            # Pose bones use ZYX euler mode (build_blender_scene), so quaternion keys must
+            # be converted — Blender ignores rotation_quaternion keys on euler-mode bones.
+            # Apply the same rest correction as the euler path.
+            posed_euler = []
+            for (frame, w, x, y, z) in bone_data['quaternion']:
+                R_pose = _mat3_mul(R_rest_T, _mat3_from_quat(w, x, y, z))
+                posed_euler.append((frame,) + _euler_from_mat3_njm(R_pose))
+            for axis_i in range(3):
+                fc = new_fc("%s.rotation_euler" % prefix, axis_i, bone_name)
+                fc.keyframe_points.add(len(posed_euler))
+                for ki, (frame, prx, pry, prz) in enumerate(posed_euler):
                     kp = fc.keyframe_points[ki]
-                    kp.co = (float(frame + 1), (w, x, y, z)[comp_i])
+                    kp.co = (float(frame + 1), (prx, pry, prz)[axis_i])
                     kp.interpolation = interp_type
                 fc.update()
 
@@ -4537,7 +4813,7 @@ class PSO_PT_gsl_tools(Panel):
 # Menu hooks
 # ============================================================
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_pso_actor.bl_idname, text="PSO Actor Model (.xj/.nj/.gj)")
+    self.layout.operator(IMPORT_OT_pso_actor.bl_idname, text="PSO Actor Model (.xj/.nj/.gj/.rel)")
     self.layout.operator(IMPORT_OT_pso_stage.bl_idname, text="PSO Stage Model (n.rel)")
     self.layout.operator(IMPORT_OT_pso_bml.bl_idname,   text="PSO BML Archive (.bml)")
 
