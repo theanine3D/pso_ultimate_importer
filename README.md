@@ -10,7 +10,7 @@ Need help with this addon? Join the [Realitea Discord](https://discord.gg/43ggeG
 ## Features
 Currently, the addon supports the following [formats](https://github.com/theanine3D/pso_ultimate_importer/wiki/Format-Specification):
 
-| Platform      | Actors | Stages | Textures | Archives |
+| Platform      | Actors | Stages | Textures | Containers |
 |---------------|-------------|------------------|---------------|----------|
 | Dreamcast v2  | `.nj`, `.njm`       | `n.rel`           | `.pvm`        |   `.gsl`, `.bml`, `.rel`        |
 | GameCube      | `.gj`, `.njm`       | `n.rel`           | `.gvm`        |   `.gsl`, `.bml`, `.rel`        |
