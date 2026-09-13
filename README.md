@@ -12,9 +12,9 @@ Currently, the addon supports the following [formats](https://github.com/theanin
 
 | Platform      | Actors | Stages | Textures | Archives |
 |---------------|-------------|------------------|---------------|----------|
-| Dreamcast v2  | `.nj`, `.njm`       | `n.rel`           | `.pvm`        |   `.gsl`, `.bml`        |
-| GameCube      | `.gj`, `.njm`       | `n.rel`           | `.gvm`        |   `.gsl`, `.bml`        |
-| Blue Burst    | `.xj`, `.njm`       | `n.rel`           | `.xvm`        |   `.gsl`, `.bml`        |
+| Dreamcast v2  | `.nj`, `.njm`       | `n.rel`           | `.pvm`        |   `.gsl`, `.bml`, `.rel`        |
+| GameCube      | `.gj`, `.njm`       | `n.rel`           | `.gvm`        |   `.gsl`, `.bml`, `.rel`        |
+| Blue Burst    | `.xj`, `.njm`       | `n.rel`           | `.xvm`        |   `.gsl`, `.bml`, `.rel`        |
 
 Import settings allow you to customize some quality-of-life features.
 - **Blend Vertex Colors** - recreates the original lighting from PSO by blending the vertex colors onto albedo textures, for any mesh that has vertex colors
