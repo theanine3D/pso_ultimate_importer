@@ -29,8 +29,7 @@ You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "
 </p>
 
 
-Currently, this addon does *not* support:
-- Exporting models (not planned)
+This addon does *not* support exporting to PSO's formats. It is import-only.
 
 ## Installation
 1. Click the green "Code" button above and press "Download ZIP"
