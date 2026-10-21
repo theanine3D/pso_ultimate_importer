@@ -1,7 +1,7 @@
 bl_info = {
     "name": "PSO Ultimate Importer",
     "author": "Theanine3D",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (4, 2, 0),
     "location": "File > Import > PSO …",
     "description": (
@@ -4710,6 +4710,126 @@ def gsl_read_archive(filepath):
 
 
 # ============================================================
+# AFS archive parser / PRS detection
+# ============================================================
+def data_kind_ext(blob):
+    """File extension from the data's header magic, or None if unknown.
+    A texture list chunk (xJTL) usually precedes the model chunk - both give the model's extension."""
+    magic = blob[:4]
+    if magic in (b'GVMH', b'GVRT'):
+        return '.gvm'
+    if magic in (b'PVMH', b'PVRT'):
+        return '.pvm'
+    if magic in (b'XVMH', b'XVRT'):
+        return '.xvm'
+    if magic in (b'NJCM', b'NJTL'):
+        return '.nj'
+    if magic in (b'GJCM', b'GJTL'):
+        return '.gj'
+    if magic == b'NMDM':
+        return '.njm'
+    return None
+
+
+def prs_unpack_strict(blob):
+    """The PRS-unpacked data if `blob` is one whole PRS stream, else None. PRS has no magic,
+    so a stream counts only if it decodes cleanly: every back-reference stays inside the
+    output so far, the end marker is reached, and at most 31 zero padding bytes follow it."""
+    out = bytearray()
+    i = 0
+    bits = nb = 0
+    n = len(blob)
+    try:
+        def bit():
+            nonlocal bits, nb, i
+            if nb == 0:
+                bits = blob[i]; i += 1; nb = 8
+            b = bits & 1
+            bits >>= 1; nb -= 1
+            return b
+        while True:
+            if bit():
+                out.append(blob[i]); i += 1
+                continue
+            if bit():
+                w = blob[i] | (blob[i + 1] << 8); i += 2
+                if w == 0:
+                    break
+                off = (w >> 3) - 0x2000
+                ln = w & 7
+                if ln == 0:
+                    ln = blob[i] + 1; i += 1
+                else:
+                    ln += 2
+            else:
+                ln = ((bit() << 1) | bit()) + 2
+                off = blob[i] - 0x100; i += 1
+            if -off > len(out):
+                return None
+            for _ in range(ln):
+                out.append(out[off])
+            if len(out) > 64 << 20:
+                return None
+    except IndexError:
+        return None
+    if i > n or n - i > 31 or any(blob[i:]):
+        return None
+    return bytes(out)
+
+
+def afs_read_archive(filepath):
+    """Parse an AFS archive and return a list of {'index', 'filename' (or None), 'data'}.
+    Layout (LE): "AFS\\0", u32 count, count x (u32 offset, u32 size), then optionally one
+    more (offset, size) pair pointing at a name table of count x 0x30-byte records."""
+    with open(filepath, 'rb') as fp:
+        data = fp.read()
+    if data[:4] != b'AFS\x00':
+        raise ValueError("not an AFS archive (no 'AFS' header)")
+    count = struct.unpack_from('<I', data, 4)[0]
+    table = [struct.unpack_from('<II', data, 8 + 8 * i) for i in range(count)]
+    names = [None] * count
+    if 16 + 8 * count <= len(data):
+        no, ns = struct.unpack_from('<II', data, 8 + 8 * count)
+        if 0 < no < len(data) and ns >= count * 0x30:
+            for i in range(count):
+                raw = data[no + i * 0x30:no + i * 0x30 + 0x20].split(b'\x00')[0]
+                try:
+                    nm = raw.decode('ascii')
+                except UnicodeDecodeError:
+                    nm = ''
+                if nm and all(c.isprintable() and c not in '\\/:*?"<>|' for c in nm):
+                    names[i] = nm
+    return [{'index': i, 'filename': names[i], 'data': data[off:off + size]}
+            for i, (off, size) in enumerate(table)]
+
+
+# ============================================================
+# PNG writer (RGBA, top row first) for texture conversion
+# ============================================================
+def write_png_rgba(path, width, height, pixels):
+    import zlib
+    stride = width * 4
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)   # filter: none
+        raw += pixels[y * stride:(y + 1) * stride]
+
+    def chunk(tag, body):
+        return (struct.pack('>I', len(body)) + tag + body +
+                struct.pack('>I', zlib.crc32(tag + body) & 0xffffffff))
+
+    with open(path, 'wb') as f:
+        f.write(b'\x89PNG\r\n\x1a\n')
+        f.write(chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)))
+        f.write(chunk(b'IDAT', zlib.compress(bytes(raw), 6)))
+        f.write(chunk(b'IEND', b''))
+
+
+def _safe_filename(name):
+    return ''.join('_' if c in '\\/:*?"<>|' or not c.isprintable() else c for c in name)
+
+
+# ============================================================
 # Sidebar panel properties
 # ============================================================
 class PSO_PG_panel_props(PropertyGroup):
@@ -4719,12 +4839,201 @@ class PSO_PG_panel_props(PropertyGroup):
         default="",
         subtype='FILE_PATH',
     )
-    gsl_output_dir: StringProperty(
-        name="Output Folder",
-        description="Directory where extracted files will be written",
+    afs_filepath: StringProperty(
+        name="AFS File",
+        description="Path to the AFS archive to extract",
+        default="",
+        subtype='FILE_PATH',
+    )
+    afs_decompress: BoolProperty(
+        name="Recursive PRS Decompress",
+        description="If enabled, any files inside the AFS that are detected to be PRS-compressed will themselves be also decompressed",
+        default=False,
+    )
+    prs_filepath: StringProperty(
+        name="PRS File",
+        description="Path to the PRS-compressed file to decompress",
+        default="",
+        subtype='FILE_PATH',
+    )
+    tex_input_dir: StringProperty(
+        name="Input Folder",
+        description="Folder containing PVM / GVM / XVM texture archives",
         default="",
         subtype='DIR_PATH',
     )
+
+
+# ============================================================
+# Shared path validation for the sidebar tools
+# ============================================================
+def _prepare_output_dir(operator, in_path, label, tag, is_dir=False):
+    """Validate the input path and create its output folder: an "output_<tag>" subfolder
+    beside the input file, or inside the input folder. Returns the folder, or None on error."""
+    if not in_path:
+        operator.report({'ERROR'}, "No %s specified" % label)
+        return None
+    in_path = os.path.normpath(in_path)
+    if not (os.path.isdir(in_path) if is_dir else os.path.isfile(in_path)):
+        operator.report({'ERROR'}, "%s not found: %s" % (label, in_path))
+        return None
+    parent  = in_path if is_dir else os.path.dirname(in_path)
+    out_dir = os.path.join(parent, "output_" + tag)
+    os.makedirs(out_dir, exist_ok=True)
+    return out_dir
+
+
+# ============================================================
+# AFS extract operator
+# ============================================================
+class PSO_OT_extract_afs(Operator):
+    bl_idname      = "pso.extract_afs"
+    bl_label       = "Extract AFS"
+    bl_description = ("Extract all files from the selected AFS archive to an output_afs subfolder beside it, "
+                      "naming each by its detected type (.gvm/.pvm/.xvm/.nj/.gj/.njm/.prs)")
+
+    def execute(self, context):
+        props = context.scene.pso_panel
+
+        afs_path = bpy.path.abspath(props.afs_filepath).strip()
+        out_dir = _prepare_output_dir(self, afs_path, "AFS file", "afs")
+        if not out_dir:
+            return {'CANCELLED'}
+
+        try:
+            entries = afs_read_archive(afs_path)
+        except Exception as e:
+            self.report({'ERROR'}, "Failed to read AFS: %s" % e)
+            return {'CANCELLED'}
+
+        if not entries:
+            self.report({'WARNING'}, "AFS archive is empty")
+            return {'CANCELLED'}
+
+        n_dec = 0
+        for entry in entries:
+            blob = entry['data']
+            kind = data_kind_ext(blob)
+            dec  = prs_unpack_strict(blob) if (not kind and blob) else None
+            if entry['filename']:
+                fname = '%03d_%s' % (entry['index'], entry['filename'])
+            else:
+                fname = '%03d%s' % (entry['index'], kind or ('.prs' if dec is not None else '.bin'))
+            try:
+                with open(os.path.join(out_dir, fname), 'wb') as f:
+                    f.write(blob)
+                if props.afs_decompress and dec:
+                    dec_name = os.path.splitext(fname)[0] + (data_kind_ext(dec) or '.dec')
+                    with open(os.path.join(out_dir, dec_name), 'wb') as f:
+                        f.write(dec)
+                    n_dec += 1
+            except OSError as e:
+                self.report({'WARNING'}, "Could not write %s: %s" % (fname, e))
+
+        msg = "Extracted %d file(s) to %s" % (len(entries), out_dir)
+        if props.afs_decompress:
+            msg += " (%d decompressed)" % n_dec
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+# ============================================================
+# PRS decompress operator
+# ============================================================
+class PSO_OT_extract_prs(Operator):
+    bl_idname      = "pso.extract_prs"
+    bl_label       = "Decompress PRS"
+    bl_description = ("Decompress the selected PRS file to an output_prs subfolder beside it, "
+                      "naming it by its detected type")
+
+    def execute(self, context):
+        props = context.scene.pso_panel
+
+        prs_path = bpy.path.abspath(props.prs_filepath).strip()
+        out_dir = _prepare_output_dir(self, prs_path, "PRS file", "prs")
+        if not out_dir:
+            return {'CANCELLED'}
+
+        with open(prs_path, 'rb') as f:
+            blob = f.read()
+        dec = prs_unpack_strict(blob)
+        if not dec:
+            self.report({'ERROR'}, "Not a valid PRS stream: %s" % os.path.basename(prs_path))
+            return {'CANCELLED'}
+
+        base = os.path.splitext(os.path.basename(prs_path))[0]
+        dest = os.path.join(out_dir, base + (data_kind_ext(dec) or '.bin'))
+        if os.path.abspath(dest) == os.path.abspath(prs_path):
+            dest = os.path.join(out_dir, base + '.dec')
+        try:
+            with open(dest, 'wb') as f:
+                f.write(dec)
+        except OSError as e:
+            self.report({'ERROR'}, "Could not write %s: %s" % (dest, e))
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, "Decompressed %d -> %d bytes: %s" % (len(blob), len(dec), dest))
+        return {'FINISHED'}
+
+
+# ============================================================
+# PVM / GVM / XVM folder -> PNG converter operator
+# ============================================================
+class PSO_OT_convert_textures(Operator):
+    bl_idname      = "pso.convert_textures"
+    bl_label       = "Convert Textures"
+    bl_description = ("Convert every PVM / GVM / XVM archive in the input folder to PNG images "
+                      "in an output_tex subfolder (one subfolder per archive)")
+
+    def execute(self, context):
+        props = context.scene.pso_panel
+
+        in_dir  = bpy.path.abspath(props.tex_input_dir).strip()
+        out_dir = _prepare_output_dir(self, in_dir, "input folder", "tex", is_dir=True)
+        if not out_dir:
+            return {'CANCELLED'}
+
+        files = sorted(fn for fn in os.listdir(in_dir)
+                       if os.path.splitext(fn)[1].lower() in ('.pvm', '.gvm', '.xvm')
+                       and os.path.isfile(os.path.join(in_dir, fn)))
+        if not files:
+            self.report({'WARNING'}, "No PVM / GVM / XVM files found in %s" % in_dir)
+            return {'CANCELLED'}
+
+        n_arch = n_tex = 0
+        for fn in files:
+            try:
+                with open(os.path.join(in_dir, fn), 'rb') as f:
+                    raw = f.read()
+                if not data_kind_ext(raw):
+                    raw = prs_unpack_strict(raw) or raw   # PRS-packed archive
+                textures = load_texture_archive(raw)
+            except Exception as e:
+                self.report({'WARNING'}, "Failed to decode %s: %s" % (fn, e))
+                continue
+            if not textures:
+                self.report({'WARNING'}, "No textures in %s" % fn)
+                continue
+
+            sub = os.path.join(out_dir, os.path.splitext(fn)[0])
+            os.makedirs(sub, exist_ok=True)
+            used = set()
+            for i, tex in enumerate(textures):
+                name = _safe_filename(tex['name']) or "texture_%03d" % i
+                if name.lower() in used:
+                    name = "%s_%03d" % (name, i)
+                used.add(name.lower())
+                try:
+                    write_png_rgba(os.path.join(sub, name + '.png'),
+                                   tex['width'], tex['height'], tex['pixels'])
+                    n_tex += 1
+                except Exception as e:
+                    self.report({'WARNING'}, "Could not write %s/%s.png: %s" % (fn, name, e))
+            n_arch += 1
+
+        self.report({'INFO'}, "Converted %d texture(s) from %d archive(s) to %s"
+                    % (n_tex, n_arch, out_dir))
+        return {'FINISHED'}
 
 
 # ============================================================
@@ -4733,25 +5042,15 @@ class PSO_PG_panel_props(PropertyGroup):
 class PSO_OT_extract_gsl(Operator):
     bl_idname      = "pso.extract_gsl"
     bl_label       = "Extract GSL"
-    bl_description = "Extract all files from the selected GSL archive to the output folder"
+    bl_description = "Extract all files from the selected GSL archive to an output_gsl subfolder beside it"
 
     def execute(self, context):
         props = context.scene.pso_panel
 
         gsl_path = bpy.path.abspath(props.gsl_filepath).strip()
-        out_dir  = bpy.path.abspath(props.gsl_output_dir).strip()
-
-        if not gsl_path:
-            self.report({'ERROR'}, "No GSL file specified")
-            return {'CANCELLED'}
-        if not os.path.isfile(gsl_path):
-            self.report({'ERROR'}, "GSL file not found: %s" % gsl_path)
-            return {'CANCELLED'}
+        out_dir  = _prepare_output_dir(self, gsl_path, "GSL file", "gsl")
         if not out_dir:
-            self.report({'ERROR'}, "No output folder specified")
             return {'CANCELLED'}
-
-        os.makedirs(out_dir, exist_ok=True)
 
         try:
             entries = gsl_read_archive(gsl_path)
@@ -4796,6 +5095,7 @@ class PSO_PT_gsl_tools(Panel):
     bl_region_type = 'UI'
     bl_category    = "PSO"
     bl_parent_id   = "PSO_PT_sidebar"
+    bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         l     = self.layout
@@ -4803,10 +5103,66 @@ class PSO_PT_gsl_tools(Panel):
 
         l.label(text="GSL Archive:")
         l.prop(props, "gsl_filepath", text="")
-        l.label(text="Output Folder:")
-        l.prop(props, "gsl_output_dir", text="")
         l.separator()
         l.operator("pso.extract_gsl", icon='EXPORT')
+
+
+class PSO_PT_afs_tools(Panel):
+    bl_label       = "AFS Extraction"
+    bl_idname      = "PSO_PT_afs_tools"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = "PSO"
+    bl_parent_id   = "PSO_PT_sidebar"
+    bl_options     = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        l     = self.layout
+        props = context.scene.pso_panel
+
+        l.label(text="AFS Archive:")
+        l.prop(props, "afs_filepath", text="")
+        l.prop(props, "afs_decompress")
+        l.separator()
+        l.operator("pso.extract_afs", icon='EXPORT')
+
+
+class PSO_PT_prs_tools(Panel):
+    bl_label       = "PRS Extraction"
+    bl_idname      = "PSO_PT_prs_tools"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = "PSO"
+    bl_parent_id   = "PSO_PT_sidebar"
+    bl_options     = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        l     = self.layout
+        props = context.scene.pso_panel
+
+        l.label(text="PRS File:")
+        l.prop(props, "prs_filepath", text="")
+        l.separator()
+        l.operator("pso.extract_prs", icon='EXPORT')
+
+
+class PSO_PT_texture_tools(Panel):
+    bl_label       = "PVM/GVM/XVM Conversion"
+    bl_idname      = "PSO_PT_texture_tools"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = "PSO"
+    bl_parent_id   = "PSO_PT_sidebar"
+    bl_options     = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        l     = self.layout
+        props = context.scene.pso_panel
+
+        l.label(text="Input Folder:")
+        l.prop(props, "tex_input_dir", text="")
+        l.separator()
+        l.operator("pso.convert_textures", icon='EXPORT')
 
 
 # ============================================================
@@ -4826,8 +5182,14 @@ _CLASSES = (
     IMPORT_OT_pso_bml,
     PSO_PG_panel_props,
     PSO_OT_extract_gsl,
+    PSO_OT_extract_afs,
+    PSO_OT_extract_prs,
+    PSO_OT_convert_textures,
     PSO_PT_sidebar,
     PSO_PT_gsl_tools,
+    PSO_PT_afs_tools,
+    PSO_PT_prs_tools,
+    PSO_PT_texture_tools,
 )
 
 def register():
