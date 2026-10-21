@@ -23,9 +23,9 @@ Import settings allow you to customize some quality-of-life features.
 - **Attempt Sky Import** - tries to automatically import a matching skybox file (if found) from the same folder as the n.rel stage file being imported
 - **Import Animations** - automatically imports any .njm animation files for your selected model - .njm must be in the same folder or in the same BML archive being imported
 
-You can also find a GSL extractor tool in the 3D viewport's sidebar, under the "PSO" tab. This will allow you to extract all of a GSL file's contents to a specified folder, without directly importing them into your Blender scene.
+You can also find converter and extraction tools in the 3D viewport's sidebar, under the "PSO" tab. These tools will allow you to extract all of a GSL, AFS, or PRS file's contents, without directly importing them into your Blender scene. There's also a texture batch converter that can convert a whole folder of .XVM, .GVM, or .PVM texture files to PNG.
 <p align="center">
-   <img width="367" height="221" alt="image" src="https://github.com/user-attachments/assets/06387cde-bc0d-4195-847b-f6137393e30f" />
+<img width="270" height="258" alt="image" src="https://github.com/user-attachments/assets/1ba0c59a-39b3-4d25-8dec-4fa743d9f248" />
 </p>
 
 
